@@ -22,7 +22,7 @@ use ShipIt\Validation\Rules\ConfigurationSchemaRule;
 
 class ShipIt
 {
-    public const VERSION = '0.0.3-alpha';
+    public const VERSION = '0.0.4';
 
     private TerminalUI $ui;
     private TaskRunner $runner;
@@ -1866,7 +1866,8 @@ PHP;
         $payload = json_encode(['text' => $message]);
 
         foreach ([$slackUrl, $discordUrl] as $url) {
-            if (!$url) continue;
+            if (!$url)
+                continue;
 
             $ch = curl_init($url);
             curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "POST");
