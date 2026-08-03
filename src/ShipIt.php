@@ -219,7 +219,7 @@ class ShipIt
 
     private function doDeploy(): void
     {
-        $runOrder = ['backup', 'update', 'composer', 'npm', 'symlink', 'perms'];
+        $runOrder = ['backup', 'update', 'composer', 'nodejs', 'symlink', 'perms'];
         if (!empty($this->adapterRunOrderRules)) {
             $runOrder = $this->runner->mergeRunOrder($runOrder, $this->adapterRunOrderRules);
         }
@@ -507,7 +507,7 @@ PHP;
         $this->runner->addTask('backup', fn() => $this->doBackup());
         $this->runner->addTask('update', fn() => $this->doUpdate());
         $this->runner->addTask('composer', fn() => $this->runCommand('Composer Install', 'composer install --no-dev --optimize-autoloader', true));
-        $this->runner->addTask('npm', fn() => $this->runCommand('NPM Install & Build', 'npm install && npm run build'));
+        $this->runner->addTask('nodejs', fn() => $this->runNodePackageManager());
         $this->runner->addTask('perms', fn() => $this->fixPermissions());
         $this->runner->addTask('symlink', fn() => $this->createSymlinks());
 
@@ -603,6 +603,34 @@ PHP;
             }
         }
     }
+
+    private function runNodePackageManager()
+    {
+        $nodePM = new NodePackageManager($this->rootDir);
+        if (!$nodePM->hasPackageJson()) {
+            $this->ui->info("Skipping node package installation & build (no package.json found).");
+            return;
+        }
+
+        try {
+            $pm = $nodePM->detect();
+        } catch (\RuntimeException $e) {
+            $this->ui->error($e->getMessage());
+            throw $e;
+        }
+
+        $binaryPath = $this->findBinary($pm);
+        if ($binaryPath === null) {
+            $errorMessage = "Required package manager '$pm' is not installed or not in the PATH. Hook \"nodejs\" task will fail.";
+            $this->ui->error($errorMessage);
+            throw new \RuntimeException($errorMessage);
+        }
+
+        $label = strtoupper($pm) . ' Install & Build';
+        $cmd = $nodePM->getInstallAndBuildCommand($pm);
+        $this->runCommand($label, $cmd);
+    }
+
 
     private function mergeAdapterRules(array $rules1, array $rules2): array
     {
@@ -929,7 +957,7 @@ PHP;
         $postHooks = $this->runner->getPostHooks();
 
         $this->ui->info("\nDeployment Tasks in Run Order:");
-        $runOrder = ['backup', 'update', 'composer', 'npm', 'symlink', 'perms'];
+        $runOrder = ['backup', 'update', 'composer', 'nodejs', 'symlink', 'perms'];
         if (!empty($this->adapterRunOrderRules)) {
             $runOrder = $this->runner->mergeRunOrder($runOrder, $this->adapterRunOrderRules);
         }
@@ -1229,7 +1257,7 @@ PHP;
 
     private function listTasks(): void
     {
-        $runOrder = ['backup', 'update', 'composer', 'npm', 'symlink', 'perms'];
+        $runOrder = ['backup', 'update', 'composer', 'nodejs', 'symlink', 'perms'];
         if (!empty($this->adapterRunOrderRules)) {
             $runOrder = $this->runner->mergeRunOrder($runOrder, $this->adapterRunOrderRules);
         }
@@ -1403,15 +1431,36 @@ PHP;
             $composerPassed ? "Found at: $composerPath" : 'Not found in path. Hook "composer" task will fail if not resolved.'
         ];
 
-        // 5. NPM binary
-        $npmPath = $this->findBinary('npm');
-        $npmPassed = $npmPath !== null;
-        $checks[] = [
-            'Prerequisite',
-            'NPM Command',
-            $npmPassed ? 'SUCCESS' : 'WARNING',
-            $npmPassed ? "Found at: $npmPath" : 'Not found in path. Hook "npm" task will fail if not resolved.'
-        ];
+        // 5. Node Package Manager binary
+        $nodePM = new NodePackageManager($this->rootDir);
+        if (!$nodePM->hasPackageJson()) {
+            $checks[] = [
+                'Prerequisite',
+                'Node Package Manager',
+                'SUCCESS',
+                'Not required (no package.json found)'
+            ];
+        } else {
+            try {
+                $pm = $nodePM->detect();
+                $pmPath = $this->findBinary($pm);
+                $pmPassed = $pmPath !== null;
+                $checks[] = [
+                    'Prerequisite',
+                    strtoupper($pm) . ' Command',
+                    $pmPassed ? 'SUCCESS' : 'WARNING',
+                    $pmPassed ? "Found at: $pmPath" : "Not found in path. Hook \"nodejs\" task will fail if not resolved."
+                ];
+            } catch (\RuntimeException $e) {
+                $allPassed = false;
+                $checks[] = [
+                    'Prerequisite',
+                    'Node Package Manager',
+                    'FAILURE',
+                    $e->getMessage()
+                ];
+            }
+        }
 
         // 6. Configuration Check
         $configExists = file_exists($this->configFile);

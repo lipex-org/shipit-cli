@@ -48,7 +48,7 @@ class BackupRotationTest extends TestCase
         $uiProp->setValue($this->shipIt, $ui);
 
         $ignoreListProp = $reflector->getProperty('ignoreList');
-        $ignoreListProp->setValue($this->shipIt, ['composer', 'npm', 'perms', 'symlink']);
+        $ignoreListProp->setValue($this->shipIt, ['composer', 'nodejs', 'perms', 'symlink']);
     }
 
     protected function tearDown(): void

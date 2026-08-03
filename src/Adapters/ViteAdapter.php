@@ -55,7 +55,7 @@ class ViteAdapter implements AdapterInterface
     {
         return [
             'before' => [
-                'symlink' => ['npm']
+                'symlink' => ['nodejs']
             ]
         ];
     }
