@@ -53,6 +53,17 @@ class Filesystem
         return false;
     }
 
+    private function isRsyncAvailable(): bool
+    {
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            return false;
+        }
+        $output = [];
+        $status = 0;
+        @exec('which rsync 2>&1', $output, $status);
+        return $status === 0;
+    }
+
     public function copyFolder(string $source, string $destination, array $ignoreList = [], string $relativeBase = '', bool $log = false, bool $bypassIgnores = false): void
     {
         if (!is_dir($source))
@@ -62,6 +73,35 @@ class Filesystem
         if (!$bypassIgnores) {
             $sourceIgnore = $this->parseDeployIgnore($source);
             $fullIgnoreList = array_unique(array_merge($ignoreList, $sourceIgnore));
+        }
+
+        // Use rsync for efficient system-level copy if available at the top level
+        if ($relativeBase === '' && $this->isRsyncAvailable()) {
+            if ($this->dryRun) {
+                $this->ui->info("[Dry Run] Would rsync from $source to $destination");
+                return;
+            }
+            if (!is_dir($destination)) {
+                @mkdir($destination, 0777, true);
+            }
+            $cmd = "rsync -a";
+            foreach ($fullIgnoreList as $pattern) {
+                $cmd .= " --exclude=" . escapeshellarg($pattern);
+            }
+            $srcDir = rtrim($source, '/') . '/';
+            $destDir = rtrim($destination, '/') . '/';
+            $cmd .= " " . escapeshellarg($srcDir) . " " . escapeshellarg($destDir) . " 2>&1";
+
+            $output = [];
+            $status = 0;
+            @exec($cmd, $output, $status);
+            if ($status === 0) {
+                if ($log) {
+                    $this->ui->success("Copied folder using rsync: $source -> $destination");
+                }
+                return;
+            }
+            // If rsync fails, seamlessly fall back to PHP-native copy loop
         }
 
         if (!$this->dryRun && !is_dir($destination)) {

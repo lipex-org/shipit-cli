@@ -70,4 +70,9 @@ class CI4Adapter implements AdapterInterface
     {
         return ['after' => ['update' => ['migrate']]];
     }
+
+    public function rollback(ShipIt $shipIt): void
+    {
+        $shipIt->runCommand('CI4 Migrate Rollback', 'php spark migrate:rollback', true);
+    }
 }

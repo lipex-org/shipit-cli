@@ -18,6 +18,7 @@ use ShipIt\Validation\Rules\SymlinkRule;
 use ShipIt\Validation\Rules\SystemUserRule;
 use ShipIt\Validation\Rules\AdapterExistsRule;
 use ShipIt\Validation\Rules\GlobalRegistryRule;
+use ShipIt\Validation\Rules\ConfigurationSchemaRule;
 
 class ShipIt
 {
@@ -32,6 +33,11 @@ class ShipIt
     private string $deployDir;
     private string $configFile;
     private string $globalConfigFile;
+    private string $activeDir;
+    private string $releasesDir;
+    private string $sharedDir;
+    private string $currentSymlink;
+    private array $adapters = [];
 
     private array $config = [];
     private bool $dryRun = false;
@@ -44,27 +50,8 @@ class ShipIt
     private ?string $currentCmd = null;
     private ?string $user = null;
 
-    private array $updateIgnoreList = [
-        '.env',
-        '.deploy',
-        'logs',
-        'public_html',
-        'private_html',
-        'public_ftp',
-        'vendor',
-        'node_modules',
-        'stats',
-        '.git',
-        '.deployignore'
-    ];
-    private array $backupIgnoreList = [
-        'vendor',
-        'node_modules',
-        '.git',
-        '.vscode',
-        '.DS_Store',
-        '__temp_update_clone'
-    ];
+    private array $updateIgnoreList = [];
+    private array $backupIgnoreList = [];
     private array $adapterRunOrderRules = [];
 
     public function __construct(string $rootDir = '')
@@ -74,6 +61,7 @@ class ShipIt
         $this->validator = new Validator($this->ui);
 
         $this->rootDir = $rootDir ?: getcwd() ?: __DIR__;
+        $this->activeDir = $this->rootDir;
         $this->initPaths();
 
         $home = $this->getHomeDir();
@@ -100,6 +88,7 @@ class ShipIt
         $this->validator->addRule(new SystemUserRule());
         $this->validator->addRule(new AdapterExistsRule());
         $this->validator->addRule(new GlobalRegistryRule($this->globalConfigFile));
+        $this->validator->addRule(new ConfigurationSchemaRule());
     }
 
     /**
@@ -116,6 +105,7 @@ class ShipIt
         }
 
         $this->rootDir = $dir;
+        $this->activeDir = $dir;
         $this->initPaths();
     }
 
@@ -224,19 +214,52 @@ class ShipIt
             $runOrder = $this->runner->mergeRunOrder($runOrder, $this->adapterRunOrderRules);
         }
 
+        if (($this->config['strategy'] ?? 'copy') === 'symlink') {
+            $this->releasesDir = $this->rootDir . '/releases';
+            $this->sharedDir = $this->rootDir . '/shared';
+            $this->currentSymlink = $this->rootDir . '/current';
+
+            if (!$this->dryRun) {
+                if (!is_dir($this->releasesDir)) {
+                    mkdir($this->releasesDir, 0777, true);
+                }
+                if (!is_dir($this->sharedDir)) {
+                    mkdir($this->sharedDir, 0777, true);
+                }
+            }
+
+            // Create timestamped release directory
+            $timestamp = date('Ymd_His');
+            $this->activeDir = $this->releasesDir . '/release_' . $timestamp;
+        } else {
+            $this->activeDir = $this->rootDir;
+        }
+
         if ($this->dryRun) {
             $this->ui->info("DRY RUN MODE ENABLED. No files will be modified.");
         }
 
-        $this->runner->run($runOrder, $this->ignoreList, $this->onlyList, $this->ignoreAll, $this);
+        try {
+            $this->runner->run($runOrder, $this->ignoreList, $this->onlyList, $this->ignoreAll, $this);
 
-        if (!$this->dryRun) {
-            $this->config['last_shipped_at'] = date('Y-m-d H:i:s');
-            file_put_contents($this->configFile, json_encode($this->config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-            $this->updateGlobalRegistry('success');
+            if (($this->config['strategy'] ?? 'copy') === 'symlink') {
+                $this->performSymlinkSwap();
+                $this->pruneReleases();
+            }
+
+            if (!$this->dryRun) {
+                $this->config['last_shipped_at'] = date('Y-m-d H:i:s');
+                file_put_contents($this->configFile, json_encode($this->config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+                $this->updateGlobalRegistry('success');
+            }
+
+            $this->sendNotification("🚀 Deployment successful for project " . basename($this->rootDir) . " on branch " . ($this->config['branch'] ?? 'main'));
+            $this->ui->success("\n✅ Deployment completed successfully.");
+        } catch (\Throwable $e) {
+            $this->sendNotification("❌ Deployment failed for project " . basename($this->rootDir) . ": " . $e->getMessage());
+            $this->updateGlobalRegistry('failed');
+            throw $e;
         }
-
-        $this->ui->success("\n✅ Deployment completed successfully.");
     }
 
     public function runCommand(string $label, string $cmd, bool $ignoreError = false): void
@@ -245,7 +268,7 @@ class ShipIt
             $this->ui->info("[Dry Run] Would run: $label ($cmd)");
             return;
         }
-        $escaped = escapeshellarg($this->rootDir);
+        $escaped = escapeshellarg($this->activeDir);
         $fullCmd = "cd $escaped && $cmd 2>&1";
         $this->ui->info("⚙️  Running $label...");
         $output = shell_exec($fullCmd);
@@ -307,17 +330,44 @@ class ShipIt
                 'pre-update' => 'echo "Entering maintenance mode..."',
                 'post-update' => 'echo "Leaving maintenance mode..."',
             ],
+            'update_ignore' => [
+                '.env',
+                '.deploy',
+                'logs',
+                'public_html',
+                'private_html',
+                'public_ftp',
+                'vendor',
+                'node_modules',
+                'stats',
+                '.git',
+                '.deployignore'
+            ],
+            'backup_ignore' => [
+                'vendor',
+                'node_modules',
+                '.git',
+                '.vscode',
+                '.DS_Store',
+                '__temp_update_clone'
+            ],
+            'strategy' => 'copy',
+            'keep_releases' => 5,
+            'shared_files' => ['.env'],
+            'shared_dirs' => ['storage'],
         ];
 
         // 1. Load global config
         $globalConfig = [];
         if (!empty($this->globalConfigFile) && file_exists($this->globalConfigFile)) {
-            $globalData = json_decode(file_get_contents($this->globalConfigFile), true) ?: [];
+            $globalData = $this->readGlobalRegistry();
             $globalConfig = $globalData['defaults'] ?? [];
         }
 
         if ($globalOnly) {
             $this->config = array_merge($defaultConfig, $globalConfig);
+            $this->updateIgnoreList = $this->config['update_ignore'];
+            $this->backupIgnoreList = $this->config['backup_ignore'];
             return;
         }
 
@@ -329,6 +379,8 @@ class ShipIt
 
         // 3. Merge: Default < Global Defaults < Project Config
         $this->config = array_merge($defaultConfig, $globalConfig, $projectConfig);
+        $this->updateIgnoreList = $this->config['update_ignore'];
+        $this->backupIgnoreList = $this->config['backup_ignore'];
     }
 
     private function doInit(array $argv): void
@@ -559,6 +611,7 @@ PHP;
 
             if ($adapterClass) {
                 $adaptersToLoad[] = $adapterClass;
+                $this->adapters[] = $adapterClass;
             }
         }
 
@@ -606,7 +659,7 @@ PHP;
 
     private function runNodePackageManager()
     {
-        $nodePM = new NodePackageManager($this->rootDir);
+        $nodePM = new NodePackageManager($this->activeDir);
         if (!$nodePM->hasPackageJson()) {
             $this->ui->info("Skipping node package installation & build (no package.json found).");
             return;
@@ -730,6 +783,9 @@ PHP;
 
         $this->ui->info("📁 Backup started to $backupRoot ...");
         $ignoreList = $this->backupIgnoreList;
+        if (($this->config['strategy'] ?? 'copy') === 'symlink') {
+            $ignoreList = array_unique(array_merge($ignoreList, ['releases', 'shared', 'current']));
+        }
         if (isset($this->config['backup_env']) && $this->config['backup_env'] === false) {
             $ignoreList = array_unique(array_merge($ignoreList, ['.env']));
         }
@@ -753,41 +809,123 @@ PHP;
     {
         $gitRepoUrl = $this->config['gitRepoUrl'] ?? null;
         $branch = $this->config['branch'] ?? 'main';
-        $cloneFolder = $this->rootDir . "/__temp_update_clone";
 
         if (!$gitRepoUrl) {
             $this->ui->error("No gitRepoUrl set in config.json or via arguments.");
             exit(1);
         }
 
-        if (is_dir($cloneFolder) && !$this->dryRun) {
-            $this->fs->removeFolder($cloneFolder);
-        }
-
-        $this->ui->info("📥 Cloning $gitRepoUrl (branch: $branch)");
-        if (!$this->dryRun) {
-            exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($cloneFolder), $out, $status);
-            if ($status !== 0) {
-                $this->ui->error("Git clone failed.");
-                exit(1);
+        if (($this->config['strategy'] ?? 'copy') === 'symlink') {
+            $this->ui->info("📥 Cloning $gitRepoUrl (branch: $branch) to release folder");
+            if (!$this->dryRun) {
+                if (!is_dir($this->activeDir)) {
+                    mkdir($this->activeDir, 0777, true);
+                }
+                exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($this->activeDir), $out, $status);
+                if ($status !== 0) {
+                    $this->ui->error("Git clone failed.");
+                    exit(1);
+                }
             }
-        }
+            $this->ui->success("Release clone completed");
+            $this->linkShared();
+        } else {
+            $cloneFolder = $this->rootDir . "/__temp_update_clone";
+            if (is_dir($cloneFolder) && !$this->dryRun) {
+                $this->fs->removeFolder($cloneFolder);
+            }
 
-        $this->ui->info("🔄 Updating project...");
-        $isFirstRun = $this->isFirstRun();
-        if ($isFirstRun) {
-            $this->ui->info("✨ First run detected: copying all files from repository.");
-        }
+            $this->ui->info("📥 Cloning $gitRepoUrl (branch: $branch)");
+            if (!$this->dryRun) {
+                exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($cloneFolder), $out, $status);
+                if ($status !== 0) {
+                    $this->ui->error("Git clone failed.");
+                    exit(1);
+                }
+            }
 
-        $this->fs->copyFolder($cloneFolder, $this->rootDir, $this->updateIgnoreList, '', $this->log, $isFirstRun);
-        if (!$this->dryRun) {
-            $this->fs->removeFolder($cloneFolder);
+            $this->ui->info("🔄 Updating project...");
+            $isFirstRun = $this->isFirstRun();
+            if ($isFirstRun) {
+                $this->ui->info("✨ First run detected: copying all files from repository.");
+            }
+
+            $this->fs->copyFolder($cloneFolder, $this->rootDir, $this->updateIgnoreList, '', $this->log, $isFirstRun);
+            if (!$this->dryRun) {
+                $this->fs->removeFolder($cloneFolder);
+            }
+            $this->ui->success("Update completed");
         }
-        $this->ui->success("Update completed");
     }
 
     private function doRollback(array $argv = []): void
     {
+        $this->runRollbackHook('pre-rollback');
+        foreach ($this->adapters as $adapter) {
+            if (method_exists($adapter, 'rollback')) {
+                $adapter->rollback($this);
+            }
+        }
+
+        if (($this->config['strategy'] ?? 'copy') === 'symlink') {
+            $releasesDir = $this->rootDir . '/releases';
+            $currentSymlink = $this->rootDir . '/current';
+
+            // Check if specific release is requested as rollback target
+            $target = null;
+            foreach (array_slice($argv, 1) as $arg) {
+                if ($arg !== 'rollback' && !str_starts_with($arg, '--')) {
+                    $target = $arg;
+                    break;
+                }
+            }
+
+            if (!$target) {
+                // Find all release folders
+                $releases = glob("$releasesDir/release_*");
+                if (empty($releases) || count($releases) < 2) {
+                    $this->ui->error("No previous releases found to rollback to.");
+                    return;
+                }
+                rsort($releases);
+
+                // If currently pointed to the latest release, rollback to the second latest
+                $currentTarget = is_link($currentSymlink) ? readlink($currentSymlink) : '';
+                if ($currentTarget && basename($currentTarget) === basename($releases[0])) {
+                    $target = $releases[1];
+                } else {
+                    $target = $releases[0];
+                }
+            } else {
+                if (!str_starts_with($target, 'release_') && !str_contains($target, '/')) {
+                    $target = "release_$target";
+                }
+                if (!str_contains($target, '/')) {
+                    $target = "$releasesDir/$target";
+                }
+            }
+
+            if (!is_dir($target)) {
+                $this->ui->error("Rollback release target not found: $target");
+                return;
+            }
+
+            $this->ui->info("⏪ Rolling back symlink to $target ...");
+            if (!$this->dryRun) {
+                $tempLink = $this->rootDir . '/current_temp';
+                if (file_exists($tempLink) || is_link($tempLink)) {
+                    @unlink($tempLink);
+                }
+                $this->createSymlink($target, $tempLink);
+                @rename($tempLink, $currentSymlink);
+            }
+            $this->ui->success("Rollback completed successfully. pointed to: " . basename($target));
+            $this->updateGlobalRegistry('success');
+            $this->sendNotification("⏪ Rollback executed successfully for project " . basename($this->rootDir) . ". pointed to: " . basename($target));
+            $this->runRollbackHook('post-rollback');
+            return;
+        }
+
         $backupRoot = $this->config['backup_path'];
         if (!is_dir($backupRoot)) {
             $this->ui->error("No backup directory found at $backupRoot.");
@@ -832,6 +970,8 @@ PHP;
         $this->fs->copyFolder($target, $this->rootDir, [], '', $this->log, true);
         $this->ui->success("Rollback completed successfully.");
         $this->updateGlobalRegistry('success');
+        $this->sendNotification("⏪ Rollback executed successfully for project " . basename($this->rootDir) . ". restored from backup: " . basename($target));
+        $this->runRollbackHook('post-rollback');
     }
 
     private function doBackups(): void
@@ -879,6 +1019,10 @@ PHP;
 
     private function fixPermissions(): void
     {
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            $this->ui->info("⏩ Skipping file permissions adjustments on Windows environment.");
+            return;
+        }
         $user = $this->config['user'] ?? null;
         $group = $this->config['group'] ?? null;
 
@@ -886,7 +1030,7 @@ PHP;
         if ($user || $group) {
             $ownership = (array) ($this->config['ownership'] ?? []);
             foreach ($ownership as $path) {
-                $fullPath = $this->rootDir . '/' . $path;
+                $fullPath = $this->activeDir . '/' . $path;
                 if (file_exists($fullPath)) {
                     $cmd = "chown -R ";
                     if ($user)
@@ -902,7 +1046,7 @@ PHP;
         // 2. Chmod writable
         $writable = (array) ($this->config['writable'] ?? []);
         foreach ($writable as $path) {
-            $fullPath = $this->rootDir . '/' . $path;
+            $fullPath = $this->activeDir . '/' . $path;
             if (file_exists($fullPath)) {
                 $this->runCommand("Apply Writable Perms ($path)", "chmod -R 775 " . escapeshellarg($fullPath), true);
             }
@@ -917,8 +1061,8 @@ PHP;
                 continue;
             [$src, $dest] = $pair;
 
-            $fullSrc = $this->rootDir . '/' . $src;
-            $fullDest = $this->rootDir . '/' . $dest;
+            $fullSrc = $this->activeDir . '/' . $src;
+            $fullDest = $this->activeDir . '/' . $dest;
 
             if (!file_exists($fullSrc)) {
                 $this->ui->warning("Symlink source not found: $src (Skipping)");
@@ -926,10 +1070,27 @@ PHP;
             }
 
             if (file_exists($fullDest) || is_link($fullDest)) {
-                $this->runCommand("Remove existing target ($dest)", "rm -rf " . escapeshellarg($fullDest), true);
+                if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                    if (is_dir($fullDest)) {
+                        @exec("rd /s /q " . escapeshellarg(str_replace('/', DIRECTORY_SEPARATOR, $fullDest)));
+                    } else {
+                        @unlink($fullDest);
+                    }
+                } else {
+                    $this->runCommand("Remove existing target ($dest)", "rm -rf " . escapeshellarg($fullDest), true);
+                }
             }
 
-            $this->runCommand("Create Symlink ($src -> $dest)", "ln -s " . escapeshellarg($fullSrc) . " " . escapeshellarg($fullDest), true);
+            if ($this->dryRun) {
+                $this->ui->info("[Dry Run] Would create symlink: $fullSrc -> $fullDest");
+                continue;
+            }
+
+            if ($this->createSymlink($fullSrc, $fullDest)) {
+                $this->ui->success("Created Symlink ($src -> $dest)");
+            } else {
+                $this->ui->error("Failed to create Symlink ($src -> $dest)");
+            }
         }
     }
 
@@ -1251,7 +1412,7 @@ PHP;
             return null;
         }
 
-        $registry = json_decode(file_get_contents($this->globalConfigFile), true) ?: [];
+        $registry = $this->readGlobalRegistry();
         return $registry['integrations'][$provider]['users'][$username]['token'] ?? null;
     }
 
@@ -1537,6 +1698,187 @@ PHP;
     private function showVersion(): void
     {
         $this->ui->info("ShipIt version " . self::VERSION);
+    }
+
+    private function linkShared(): void
+    {
+        if (($this->config['strategy'] ?? 'copy') !== 'symlink') {
+            return;
+        }
+
+        $sharedFiles = (array) ($this->config['shared_files'] ?? []);
+        $sharedDirs = (array) ($this->config['shared_dirs'] ?? []);
+
+        foreach ($sharedFiles as $file) {
+            $sharedPath = $this->sharedDir . '/' . $file;
+            $releasePath = $this->activeDir . '/' . $file;
+
+            if ($this->dryRun) {
+                $this->ui->info("[Dry Run] Would link shared file: $sharedPath -> $releasePath");
+                continue;
+            }
+
+            if (!file_exists($sharedPath)) {
+                if (file_exists($releasePath)) {
+                    copy($releasePath, $sharedPath);
+                } elseif (file_exists($releasePath . '.example')) {
+                    copy($releasePath . '.example', $sharedPath);
+                } else {
+                    file_put_contents($sharedPath, '');
+                }
+            }
+
+            if (file_exists($releasePath) || is_link($releasePath)) {
+                @unlink($releasePath);
+            }
+
+            $this->createSymlink($sharedPath, $releasePath);
+        }
+
+        foreach ($sharedDirs as $dir) {
+            $sharedPath = $this->sharedDir . '/' . $dir;
+            $releasePath = $this->activeDir . '/' . $dir;
+
+            if ($this->dryRun) {
+                $this->ui->info("[Dry Run] Would link shared directory: $sharedPath -> $releasePath");
+                continue;
+            }
+
+            if (!is_dir($sharedPath)) {
+                if (is_dir($releasePath)) {
+                    $this->fs->copyFolder($releasePath, $sharedPath);
+                } else {
+                    mkdir($sharedPath, 0777, true);
+                }
+            }
+
+            if (is_dir($releasePath) || is_link($releasePath)) {
+                $this->fs->removeFolder($releasePath);
+            }
+
+            $this->createSymlink($sharedPath, $releasePath);
+        }
+    }
+
+    private function performSymlinkSwap(): void
+    {
+        if ($this->dryRun) {
+            $this->ui->info("[Dry Run] Would point symlink $this->currentSymlink to $this->activeDir");
+            return;
+        }
+
+        $tempLink = $this->rootDir . '/current_temp';
+        if (file_exists($tempLink) || is_link($tempLink)) {
+            @unlink($tempLink);
+        }
+
+        if (!$this->createSymlink($this->activeDir, $tempLink)) {
+            $this->ui->error("❌ Failed to create temp symlink.");
+            exit(1);
+        }
+
+        if (!@rename($tempLink, $this->currentSymlink)) {
+            $this->ui->error("❌ Atomic symlink swap failed.");
+            exit(1);
+        }
+
+        $this->ui->success("🔄 Atomic symlink swap successful. Live site pointed to: " . basename($this->activeDir));
+    }
+
+    private function pruneReleases(): void
+    {
+        if ($this->dryRun) {
+            return;
+        }
+
+        $keep = $this->config['keep_releases'] ?? 5;
+        $releases = glob($this->releasesDir . '/release_*');
+        if (!$releases) {
+            return;
+        }
+
+        sort($releases);
+
+        if (count($releases) > $keep) {
+            $toDelete = array_slice($releases, 0, count($releases) - $keep);
+            foreach ($toDelete as $folder) {
+                $this->ui->info("🗑️ Pruning old release: " . basename($folder));
+                $this->fs->removeFolder($folder);
+            }
+        }
+    }
+
+    private function createSymlink(string $target, string $link): bool
+    {
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            $target = str_replace('/', DIRECTORY_SEPARATOR, $target);
+            $link = str_replace('/', DIRECTORY_SEPARATOR, $link);
+            if (is_dir($target)) {
+                @exec("mklink /J " . escapeshellarg($link) . " " . escapeshellarg($target), $out, $status);
+                return $status === 0;
+            } else {
+                @exec("mklink " . escapeshellarg($link) . " " . escapeshellarg($target), $out, $status);
+                return $status === 0;
+            }
+        }
+        return @symlink($target, $link);
+    }
+
+    public function readGlobalRegistry(): array
+    {
+        if (empty($this->globalConfigFile) || !file_exists($this->globalConfigFile)) {
+            return [];
+        }
+        $fp = fopen($this->globalConfigFile, 'r');
+        if (!$fp) {
+            return [];
+        }
+        $content = '';
+        if (flock($fp, LOCK_SH)) {
+            clearstatcache(true, $this->globalConfigFile);
+            $fileSize = filesize($this->globalConfigFile);
+            if ($fileSize > 0) {
+                $content = fread($fp, $fileSize);
+            }
+            flock($fp, LOCK_UN);
+        }
+        fclose($fp);
+        return json_decode($content, true) ?: [];
+    }
+
+    private function runRollbackHook(string $type): void
+    {
+        $hooks = $this->config['hooks'] ?? [];
+        if (isset($hooks[$type])) {
+            $this->runCommand(ucfirst($type) . ' hook', $hooks[$type], true);
+        }
+    }
+
+    private function sendNotification(string $message): void
+    {
+        $slackUrl = $this->config['slack_webhook_url'] ?? null;
+        $discordUrl = $this->config['discord_webhook_url'] ?? null;
+
+        if (!$slackUrl && !$discordUrl) {
+            return;
+        }
+
+        $payload = json_encode(['text' => $message]);
+
+        foreach ([$slackUrl, $discordUrl] as $url) {
+            if (!$url) continue;
+
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "POST");
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Content-Type: application/json',
+                'Content-Length: ' . strlen($payload)
+            ]);
+            curl_exec($ch);
+            curl_close($ch);
+        }
     }
 
     public function getRootDir(): string

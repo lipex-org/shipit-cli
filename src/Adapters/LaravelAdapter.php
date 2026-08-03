@@ -65,4 +65,9 @@ class LaravelAdapter implements AdapterInterface
             ]
         ];
     }
+
+    public function rollback(ShipIt $shipIt): void
+    {
+        $shipIt->runCommand('Laravel Migrate Rollback', 'php artisan migrate:rollback --force', true);
+    }
 }
