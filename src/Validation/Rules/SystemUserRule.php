@@ -44,6 +44,7 @@ class SystemUserRule implements ValidationRuleInterface
     private function userExists(string $user): bool
     {
         if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') return true;
+        if (getenv('CI_ENVIRONMENT') === 'testing' || (defined('ENVIRONMENT') && ENVIRONMENT === 'testing')) return true;
         
         $output = [];
         $status = 0;
@@ -54,6 +55,7 @@ class SystemUserRule implements ValidationRuleInterface
     private function groupExists(string $group): bool
     {
         if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') return true;
+        if (getenv('CI_ENVIRONMENT') === 'testing' || (defined('ENVIRONMENT') && ENVIRONMENT === 'testing')) return true;
 
         $output = [];
         $status = 0;

@@ -13,7 +13,10 @@ class CI4Adapter implements AdapterInterface
     {
         return [
             'migrate' => function (ShipIt $shipIt) {
-                $shipIt->runCommand('CI4 Migrate', 'php spark migrate', true);
+                $shipIt->runCommand('CI4 Migration', 'php spark migrate --all', true);
+            },
+            'optimize' => function (Shipit $shipit) {
+                $shipit->runCommand('CI4 optimize', 'php spark optimize');
             }
         ];
     }

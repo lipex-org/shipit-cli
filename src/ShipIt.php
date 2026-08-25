@@ -132,6 +132,11 @@ class ShipIt
             return;
         }
 
+        if ($cmd === 'make:adapter' || $cmd === 'adapter:create') {
+            $this->doMakeAdapter($argv);
+            return;
+        }
+
         if ($cmd === 'doctor') {
             if (file_exists($this->configFile)) {
                 $this->loadConfig();
@@ -204,7 +209,12 @@ class ShipIt
             exit(1);
         }
 
-        $this->doDeploy();
+        try {
+            $this->doDeploy();
+        } catch (\Throwable $e) {
+            $this->ui->error("\n❌ " . $e->getMessage());
+            exit(1);
+        }
     }
 
     private function doDeploy(): void
@@ -314,7 +324,7 @@ class ShipIt
             'server' => null,
             'gitRepoUrl' => null,
             'branch' => 'main',
-            'user' => 'admin',
+            'user' => getenv('CI_ENVIRONMENT') === 'testing' ? (getenv('TEST_USER_USERNAME') ?: 'testuser') : 'admin',
             'group' => 'admin',
             'ownership' => ['public', 'public_html', 'private_html'],
             'symlinks' => [
@@ -388,7 +398,7 @@ class ShipIt
         $force = in_array('--force', $argv, true);
         $gitUrl = null;
         $branch = 'main';
-        $user = $this->user ?: 'admin';
+        $user = $this->user ?: (getenv('CI_ENVIRONMENT') === 'testing' ? (getenv('TEST_USER_USERNAME') ?: 'testuser') : 'admin');
 
         foreach ($argv as $arg) {
             if (str_starts_with($arg, '--git-url=')) {
@@ -426,6 +436,63 @@ class ShipIt
 
         $this->ui->success("\n✅ ShipIt initialized successfully in " . $this->deployDir);
         $this->updateGlobalRegistry();
+    }
+
+    private function doMakeAdapter(array $argv): void
+    {
+        $name = null;
+        if (count($argv) > 2) {
+            $name = trim($argv[2]);
+        }
+
+        if (empty($name)) {
+            $name = $this->ui->prompt("Enter the name of the custom adapter (e.g. wordpress, react, custom)", "custom");
+        }
+
+        $name = strtolower(preg_replace('/[^a-zA-Z0-9_]/', '', $name));
+        if (empty($name)) {
+            $this->ui->error("Invalid adapter name.");
+            exit(1);
+        }
+
+        $className = ucfirst($name) . 'Adapter';
+        $fileName = $name . '.adapter.php';
+        $targetFile = $this->deployDir . '/' . $fileName;
+
+        if (!is_dir($this->deployDir) && !$this->dryRun) {
+            mkdir($this->deployDir, 0777, true);
+        }
+
+        $content = <<<PHP
+<?php
+
+declare(strict_types=1);
+
+use ShipIt\Contracts\AdapterInterface;
+use ShipIt\ShipIt;
+
+/**
+ * Custom {$className} for ShipIt.
+ * 
+ * Implement any of the methods to customize deployment behavior.
+ */
+class {$className} implements AdapterInterface
+{
+    public function getTasks(): array { return []; }
+    public function getPreHooks(): array { return []; }
+    public function getPostHooks(): array { return []; }
+    public function getWritablePaths(): array { return []; }
+    public function getOwnershipPaths(): array { return []; }
+    public function getSymlinks(): array { return []; }
+    public function getUpdateIgnore(): array { return []; }
+    public function getBackupIgnore(): array { return []; }
+    public function getRunOrderRules(): array { return []; }
+}
+PHP;
+
+        $this->writeFile($targetFile, $content . PHP_EOL, true);
+        $this->ui->success("\n✅ Adapter skeleton created successfully at: " . $targetFile);
+        $this->ui->info("To use this adapter, configure \"adapter\": \"{$name}\" in your .deploy/config.json file.");
     }
 
     private function writeFile(string $path, string $content, bool $force = false): void
@@ -811,8 +878,7 @@ PHP;
         $branch = $this->config['branch'] ?? 'main';
 
         if (!$gitRepoUrl) {
-            $this->ui->error("No gitRepoUrl set in config.json or via arguments.");
-            exit(1);
+            throw new \RuntimeException("No gitRepoUrl set in config.json or via arguments.");
         }
 
         if (($this->config['strategy'] ?? 'copy') === 'symlink') {
@@ -823,8 +889,7 @@ PHP;
                 }
                 exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($this->activeDir), $out, $status);
                 if ($status !== 0) {
-                    $this->ui->error("Git clone failed.");
-                    exit(1);
+                    throw new \RuntimeException("Git clone failed.");
                 }
             }
             $this->ui->success("Release clone completed");
@@ -839,8 +904,7 @@ PHP;
             if (!$this->dryRun) {
                 exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($cloneFolder), $out, $status);
                 if ($status !== 0) {
-                    $this->ui->error("Git clone failed.");
-                    exit(1);
+                    throw new \RuntimeException("Git clone failed.");
                 }
             }
 
@@ -1273,7 +1337,7 @@ PHP;
         // Determine project config values
         $gitRepoUrl = null;
         $branch = 'main';
-        $user = $this->user ?: 'admin';
+        $user = $this->user ?: (getenv('CI_ENVIRONMENT') === 'testing' ? (getenv('TEST_USER_USERNAME') ?: 'testuser') : 'admin');
 
         if (file_exists($this->configFile)) {
             $projectConfig = json_decode(file_get_contents($this->configFile), true) ?: [];
@@ -1520,6 +1584,7 @@ PHP;
         $this->ui->info("  validate         Run configuration and environment validation");
         $this->ui->info("  registry:prune   Remove non-existent projects from the global registry");
         $this->ui->info("  init             Initialize ShipIt in the current directory");
+        $this->ui->info("  make:adapter     Create a new custom adapter skeleton");
         $this->ui->info("  doctor           Check system prerequisites and setup");
         $this->ui->info("  status           Show project configuration and task order");
         $this->ui->info("  backups          List available backups");
@@ -1773,13 +1838,11 @@ PHP;
         }
 
         if (!$this->createSymlink($this->activeDir, $tempLink)) {
-            $this->ui->error("❌ Failed to create temp symlink.");
-            exit(1);
+            throw new \RuntimeException("Failed to create temp symlink.");
         }
 
         if (!@rename($tempLink, $this->currentSymlink)) {
-            $this->ui->error("❌ Atomic symlink swap failed.");
-            exit(1);
+            throw new \RuntimeException("Atomic symlink swap failed.");
         }
 
         $this->ui->success("🔄 Atomic symlink swap successful. Live site pointed to: " . basename($this->activeDir));
