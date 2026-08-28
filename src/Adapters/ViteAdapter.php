@@ -59,4 +59,9 @@ class ViteAdapter implements AdapterInterface
             ]
         ];
     }
+
+    public function getPublicFolder(): string
+    {
+        return 'dist';
+    }
 }

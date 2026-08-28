@@ -53,6 +53,8 @@ class ShipIt
     private array $updateIgnoreList = [];
     private array $backupIgnoreList = [];
     private array $adapterRunOrderRules = [];
+    private ?string $transientDeployDir = null;
+    private bool $preCloned = false;
 
     public function __construct(string $rootDir = '')
     {
@@ -168,6 +170,49 @@ class ShipIt
 
         $this->logExecution($cmd);
 
+        $isDeploy = !in_array($cmd, [
+            'init',
+            'doctor',
+            'version',
+            'config',
+            'help',
+            'validate',
+            'registry:prune',
+            'rollback',
+            'backups',
+            'list',
+            'status',
+            'make:adapter',
+            'adapter:create'
+        ], true);
+
+        if ($isDeploy) {
+            try {
+                if (!$this->ignoreAll) {
+                    $this->preCloneRepository();
+                }
+                $this->applyConfigHooks();
+                $this->applyAdapter();
+                $this->applyServerProfile();
+
+                $results = $this->validator->validate($this->config, $this->rootDir);
+                $isValid = $this->validator->displayResults($results);
+
+                if (!$isValid) {
+                    $this->ui->error("\nAborting deployment due to configuration errors.");
+                    $this->updateGlobalRegistry('failed');
+                    exit(1);
+                }
+
+                $this->doDeploy();
+            } catch (\Throwable $e) {
+                $this->ui->error("\n❌ " . $e->getMessage());
+                $this->updateGlobalRegistry('failed');
+                exit(1);
+            }
+            return;
+        }
+
         $this->applyConfigHooks();
         $this->applyAdapter();
         $this->applyServerProfile();
@@ -199,22 +244,6 @@ class ShipIt
             $this->doStatus();
             return;
         }
-
-        // Default command is 'deploy'
-        $results = $this->validator->validate($this->config, $this->rootDir);
-        $isValid = $this->validator->displayResults($results);
-
-        if (!$isValid) {
-            $this->ui->error("\nAborting deployment due to configuration errors.");
-            exit(1);
-        }
-
-        try {
-            $this->doDeploy();
-        } catch (\Throwable $e) {
-            $this->ui->error("\n❌ " . $e->getMessage());
-            exit(1);
-        }
     }
 
     private function doDeploy(): void
@@ -239,8 +268,10 @@ class ShipIt
             }
 
             // Create timestamped release directory
-            $timestamp = date('Ymd_His');
-            $this->activeDir = $this->releasesDir . '/release_' . $timestamp;
+            if (!$this->preCloned) {
+                $timestamp = date('Ymd_His');
+                $this->activeDir = $this->releasesDir . '/release_' . $timestamp;
+            }
         } else {
             $this->activeDir = $this->rootDir;
         }
@@ -254,6 +285,7 @@ class ShipIt
 
             if (($this->config['strategy'] ?? 'copy') === 'symlink') {
                 $this->performSymlinkSwap();
+                $this->createRootSymlinks();
                 $this->pruneReleases();
             }
 
@@ -495,6 +527,70 @@ PHP;
         $this->ui->info("To use this adapter, configure \"adapter\": \"{$name}\" in your .deploy/config.json file.");
     }
 
+    private function preCloneRepository(): void
+    {
+        $gitRepoUrl = $this->config['gitRepoUrl'] ?? null;
+        $branch = $this->config['branch'] ?? 'main';
+
+        if (!$gitRepoUrl) {
+            return;
+        }
+
+        if (($this->config['strategy'] ?? 'copy') === 'symlink') {
+            $this->releasesDir = $this->rootDir . '/releases';
+            $this->sharedDir = $this->rootDir . '/shared';
+            $this->currentSymlink = $this->rootDir . '/current';
+            $timestamp = date('Ymd_His');
+            $this->activeDir = $this->releasesDir . '/release_' . $timestamp;
+            $cloneTarget = $this->activeDir;
+        } else {
+            $cloneTarget = $this->rootDir . "/__temp_update_clone";
+        }
+
+        $this->transientDeployDir = $cloneTarget . '/.deploy';
+
+        if ($this->dryRun) {
+            return;
+        }
+
+        // Perform the pre-clone
+        if (($this->config['strategy'] ?? 'copy') === 'symlink') {
+            if (!is_dir($this->activeDir)) {
+                @mkdir($this->activeDir, 0777, true);
+            }
+            $this->ui->info("📥 Pre-cloning $gitRepoUrl (branch: $branch) to release folder");
+            exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($this->activeDir), $out, $status);
+            if ($status !== 0) {
+                throw new \RuntimeException("Pre-clone failed.");
+            }
+        } else {
+            if (is_dir($cloneTarget)) {
+                $this->fs->removeFolder($cloneTarget);
+            }
+            $this->ui->info("📥 Pre-cloning $gitRepoUrl (branch: $branch)");
+            exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($cloneTarget), $out, $status);
+            if ($status !== 0) {
+                throw new \RuntimeException("Pre-clone failed.");
+            }
+        }
+
+        $this->preCloned = true;
+
+        // Overlay repository-side config if present
+        $repoConfigFile = $this->transientDeployDir . '/config.json';
+        if (file_exists($repoConfigFile)) {
+            $repoConfig = json_decode(file_get_contents($repoConfigFile), true) ?: [];
+
+            // Critical server-side keys to protect
+            $protectedKeys = ['backup_path', 'user', 'group', 'webhook_token', 'webhook_secret', 'server', 'strategy', 'keep_releases'];
+            foreach ($repoConfig as $key => $value) {
+                if (!in_array($key, $protectedKeys, true)) {
+                    $this->config[$key] = $value;
+                }
+            }
+        }
+    }
+
     private function writeFile(string $path, string $content, bool $force = false): void
     {
         $filename = basename($path);
@@ -654,6 +750,8 @@ PHP;
         $adaptersToLoad = [];
         $adapterName = null;
 
+        $targetDeployDir = $this->transientDeployDir ?: $this->deployDir;
+
         // 1. Load primary framework adapter if configured
         if (!empty($this->config['adapter'])) {
             $adapterName = strtolower($this->config['adapter']);
@@ -666,7 +764,7 @@ PHP;
             } elseif ($adapterName === 'vite' || $adapterName === 'react') {
                 $adapterClass = new ViteAdapter();
             } else {
-                $adapterFile = $this->deployDir . '/' . $adapterName . '.adapter.php';
+                $adapterFile = $targetDeployDir . '/' . $adapterName . '.adapter.php';
                 if (file_exists($adapterFile)) {
                     require_once $adapterFile;
                     $className = ucfirst($adapterName) . 'Adapter';
@@ -684,7 +782,7 @@ PHP;
 
         // 2. Load local custom.adapter.php if present (and wasn't already loaded as primary)
         if ($adapterName !== 'custom') {
-            $customAdapterFile = $this->deployDir . '/custom.adapter.php';
+            $customAdapterFile = $targetDeployDir . '/custom.adapter.php';
             if (file_exists($customAdapterFile)) {
                 require_once $customAdapterFile;
                 if (class_exists('CustomAdapter')) {
@@ -784,40 +882,50 @@ PHP;
         $serverName = strtolower($this->config['server']);
         $profileFile = $this->deployDir . '/' . $serverName . '.server.php';
 
+        $profile = [];
         if (file_exists($profileFile)) {
             $profile = include $profileFile;
+        } else {
+            $builtinProfile = __DIR__ . '/Profiles/' . $serverName . '.server.php';
+            if (file_exists($builtinProfile)) {
+                $profile = include $builtinProfile;
+            }
+        }
 
-            if (is_array($profile)) {
-                // Handle arbitrary hooks/tasks/configs from a simple array return
-                if (isset($profile['tasks'])) {
-                    foreach ($profile['tasks'] as $name => $task) {
-                        $this->runner->addTask($name, $task);
-                    }
+        if (is_array($profile)) {
+            // Handle arbitrary hooks/tasks/configs from a simple array return
+            if (isset($profile['tasks'])) {
+                foreach ($profile['tasks'] as $name => $task) {
+                    $this->runner->addTask($name, $task);
                 }
+            }
 
-                foreach (['preHooks', 'postHooks'] as $type) {
-                    if (isset($profile[$type])) {
-                        foreach ($profile[$type] as $task => $hooks) {
-                            foreach ((array) $hooks as $hook) {
-                                $method = $type === 'preHooks' ? 'addPreHook' : 'addPostHook';
-                                $this->runner->{$method}($task, $hook);
-                            }
+            foreach (['preHooks', 'postHooks'] as $type) {
+                if (isset($profile[$type])) {
+                    foreach ($profile[$type] as $task => $hooks) {
+                        foreach ((array) $hooks as $hook) {
+                            $method = $type === 'preHooks' ? 'addPreHook' : 'addPostHook';
+                            $this->runner->{$method}($task, $hook);
                         }
                     }
                 }
+            }
 
-                foreach (['writable', 'ownership', 'symlinks'] as $key) {
-                    if (isset($profile[$key])) {
-                        $this->config[$key] = array_merge($this->config[$key] ?? [], $profile[$key]);
+            foreach (['writable', 'ownership', 'symlinks', 'root_symlinks'] as $key) {
+                if (isset($profile[$key])) {
+                    $val = $profile[$key];
+                    if (is_callable($val)) {
+                        $val = $val($this);
                     }
+                    $this->config[$key] = array_merge($this->config[$key] ?? [], $val);
                 }
+            }
 
-                if (isset($profile['ignoreLists']['update'])) {
-                    $this->updateIgnoreList = array_unique(array_merge($this->updateIgnoreList, $profile['ignoreLists']['update']));
-                }
-                if (isset($profile['ignoreLists']['backup'])) {
-                    $this->backupIgnoreList = array_unique(array_merge($this->backupIgnoreList, $profile['ignoreLists']['backup']));
-                }
+            if (isset($profile['ignoreLists']['update'])) {
+                $this->updateIgnoreList = array_unique(array_merge($this->updateIgnoreList, $profile['ignoreLists']['update']));
+            }
+            if (isset($profile['ignoreLists']['backup'])) {
+                $this->backupIgnoreList = array_unique(array_merge($this->backupIgnoreList, $profile['ignoreLists']['backup']));
             }
         }
     }
@@ -883,7 +991,7 @@ PHP;
 
         if (($this->config['strategy'] ?? 'copy') === 'symlink') {
             $this->ui->info("📥 Cloning $gitRepoUrl (branch: $branch) to release folder");
-            if (!$this->dryRun) {
+            if (!$this->dryRun && !$this->preCloned) {
                 if (!is_dir($this->activeDir)) {
                     mkdir($this->activeDir, 0777, true);
                 }
@@ -896,12 +1004,12 @@ PHP;
             $this->linkShared();
         } else {
             $cloneFolder = $this->rootDir . "/__temp_update_clone";
-            if (is_dir($cloneFolder) && !$this->dryRun) {
+            if (is_dir($cloneFolder) && !$this->dryRun && !$this->preCloned) {
                 $this->fs->removeFolder($cloneFolder);
             }
 
             $this->ui->info("📥 Cloning $gitRepoUrl (branch: $branch)");
-            if (!$this->dryRun) {
+            if (!$this->dryRun && !$this->preCloned) {
                 exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($cloneFolder), $out, $status);
                 if ($status !== 0) {
                     throw new \RuntimeException("Git clone failed.");
@@ -982,6 +1090,8 @@ PHP;
                 }
                 $this->createSymlink($target, $tempLink);
                 @rename($tempLink, $currentSymlink);
+                $this->activeDir = $target;
+                $this->createRootSymlinks();
             }
             $this->ui->success("Rollback completed successfully. pointed to: " . basename($target));
             $this->updateGlobalRegistry('success');
@@ -1154,6 +1264,67 @@ PHP;
                 $this->ui->success("Created Symlink ($src -> $dest)");
             } else {
                 $this->ui->error("Failed to create Symlink ($src -> $dest)");
+            }
+        }
+    }
+
+    private function createRootSymlinks(): void
+    {
+        $rootSymlinks = (array) ($this->config['root_symlinks'] ?? []);
+
+        foreach ($this->adapters as $adapter) {
+            if (method_exists($adapter, 'getRootSymlinks')) {
+                $rootSymlinks = array_merge($rootSymlinks, $adapter->getRootSymlinks());
+            }
+        }
+
+        if (empty($rootSymlinks)) {
+            return;
+        }
+
+        $this->ui->info("🔗 Creating root directory entrypoint symlinks...");
+
+        foreach ($rootSymlinks as $pair) {
+            if (!is_array($pair) || count($pair) !== 2)
+                continue;
+            [$target, $linkName] = $pair;
+
+            $fullLink = $this->rootDir . '/' . $linkName;
+
+            // Resolve actual source to check its existence inside activeDir
+            if (str_starts_with($target, 'current/')) {
+                $subPath = substr($target, 8);
+                $checkPath = $this->activeDir . '/' . $subPath;
+            } else {
+                $checkPath = $this->activeDir . '/' . $target;
+            }
+
+            if (!file_exists($checkPath) && !is_link($checkPath) && $target !== 'current') {
+                $this->ui->warning("Root symlink target source not found: $target (Skipping)");
+                continue;
+            }
+
+            if (file_exists($fullLink) || is_link($fullLink)) {
+                if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                    if (is_dir($fullLink)) {
+                        @exec("rd /s /q " . escapeshellarg(str_replace('/', DIRECTORY_SEPARATOR, $fullLink)));
+                    } else {
+                        @unlink($fullLink);
+                    }
+                } else {
+                    $this->runCommand("Remove existing target ($linkName)", "rm -rf " . escapeshellarg($fullLink), true);
+                }
+            }
+
+            if ($this->dryRun) {
+                $this->ui->info("[Dry Run] Would create root symlink: $target -> $fullLink");
+                continue;
+            }
+
+            if ($this->createSymlink($target, $fullLink)) {
+                $this->ui->success("Created Root Symlink ($target -> $linkName)");
+            } else {
+                $this->ui->error("Failed to create Root Symlink ($target -> $linkName)");
             }
         }
     }
@@ -1953,5 +2124,10 @@ PHP;
     public function getConfig(): array
     {
         return $this->config;
+    }
+
+    public function getAdapters(): array
+    {
+        return $this->adapters;
     }
 }

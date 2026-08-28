@@ -1,6 +1,0 @@
-{
-  "name": "shipit-demo",
-  "scripts": {
-    "build": "echo 'Building production assets...'"
-  }
-}

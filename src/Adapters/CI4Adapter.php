@@ -78,4 +78,9 @@ class CI4Adapter implements AdapterInterface
     {
         $shipIt->runCommand('CI4 Migrate Rollback', 'php spark migrate:rollback', true);
     }
+
+    public function getPublicFolder(): string
+    {
+        return 'public';
+    }
 }

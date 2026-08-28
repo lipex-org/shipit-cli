@@ -19,7 +19,7 @@ class ConfigurationSchemaRule implements ValidationRuleInterface
             'adapter', 'server', 'gitRepoUrl', 'branch', 'user', 'group',
             'ownership', 'symlinks', 'writable', 'backup_path', 'backup_retention',
             'hooks', 'update_ignore', 'backup_ignore', 'strategy', 'keep_releases',
-            'shared_files', 'shared_dirs'
+            'shared_files', 'shared_dirs', 'root_symlinks'
         ];
 
         // Check for unrecognized keys
@@ -54,6 +54,7 @@ class ConfigurationSchemaRule implements ValidationRuleInterface
             'keep_releases' => ['integer'],
             'shared_files' => ['array'],
             'shared_dirs' => ['array'],
+            'root_symlinks' => ['array'],
         ];
 
         foreach ($typeChecks as $key => $types) {

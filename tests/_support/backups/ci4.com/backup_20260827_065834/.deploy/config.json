@@ -1,0 +1,74 @@
+{
+    "adapter": "ci4",
+    "server": "directadmin",
+    "gitRepoUrl": "/home/ian/Desktop/Packages/shipit/package/tests/_support/repos/ci4",
+    "branch": "master",
+    "user": "ian",
+    "group": "ian",
+    "ownership": [
+        "public",
+        "public_html",
+        "private_html"
+    ],
+    "symlinks": [
+        [
+            "public",
+            "public_html"
+        ],
+        [
+            "public_html",
+            "private_html"
+        ]
+    ],
+    "writable": [
+        "storage",
+        "bootstrap/cache",
+        "writable",
+        "writable",
+        "writable/cache",
+        "writable/logs",
+        "writable/session",
+        "writable/uploads",
+        "writable",
+        "writable/cache",
+        "writable/logs",
+        "writable/session",
+        "writable/uploads"
+    ],
+    "backup_path": "/home/ian/Desktop/Packages/shipit/package/tests/_support/backups/ci4.com",
+    "backup_retention": 5,
+    "hooks": {
+        "pre-update": "echo \"Entering maintenance mode...\"",
+        "post-update": "echo \"Leaving maintenance mode...\""
+    },
+    "update_ignore": [
+        ".env",
+        ".deploy",
+        "logs",
+        "public_html",
+        "private_html",
+        "public_ftp",
+        "vendor",
+        "node_modules",
+        "stats",
+        ".git",
+        ".deployignore"
+    ],
+    "backup_ignore": [
+        "vendor",
+        "node_modules",
+        ".git",
+        ".vscode",
+        ".DS_Store",
+        "__temp_update_clone"
+    ],
+    "strategy": "symlink",
+    "keep_releases": 5,
+    "shared_files": [
+        ".env"
+    ],
+    "shared_dirs": [
+        "storage"
+    ],
+    "last_shipped_at": "2026-08-27 06:55:43"
+}

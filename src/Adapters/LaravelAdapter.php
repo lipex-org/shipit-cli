@@ -70,4 +70,9 @@ class LaravelAdapter implements AdapterInterface
     {
         $shipIt->runCommand('Laravel Migrate Rollback', 'php artisan migrate:rollback --force', true);
     }
+
+    public function getPublicFolder(): string
+    {
+        return 'public';
+    }
 }

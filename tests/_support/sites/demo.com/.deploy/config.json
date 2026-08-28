@@ -1,7 +1,7 @@
 {
     "adapter": "vite",
     "server": "",
-    "gitRepoUrl": "/home/ian/Desktop/Packages/shipit/package/tests/_support/repo",
+    "gitRepoUrl": "/home/ian/Desktop/Packages/shipit/package/tests/_support/repos/demo",
     "branch": "main",
     "user": "ian",
     "group": "ian",
@@ -98,17 +98,85 @@
         [
             "dist",
             "public_html"
+        ],
+        [
+            "dist",
+            "public_html"
+        ],
+        [
+            "dist",
+            "public_html"
+        ],
+        [
+            "dist",
+            "public_html"
+        ],
+        [
+            "dist",
+            "public_html"
+        ],
+        [
+            "dist",
+            "public_html"
+        ],
+        [
+            "dist",
+            "public_html"
+        ],
+        [
+            "dist",
+            "public_html"
+        ],
+        [
+            "dist",
+            "public_html"
+        ],
+        [
+            "dist",
+            "public_html"
+        ],
+        [
+            "dist",
+            "public_html"
         ]
     ],
     "writable": [
         "storage"
     ],
-    "backup_path": "/home/ian/Desktop/Packages/shipit/package/tests/_support/backups",
+    "backup_path": "/home/ian/Desktop/Packages/shipit/package/tests/_support/backups/demo.com",
     "backup_retention": 4,
     "hooks": {
         "pre-update": "echo \"Entering maintenance mode...\"",
         "post-update": "echo \"Leaving maintenance mode...\""
     },
-    "backup_env": true,
-    "last_shipped_at": "2026-06-06 23:49:19"
+    "update_ignore": [
+        ".env",
+        ".deploy",
+        "logs",
+        "public_html",
+        "private_html",
+        "public_ftp",
+        "vendor",
+        "node_modules",
+        "stats",
+        ".git",
+        ".deployignore"
+    ],
+    "backup_ignore": [
+        "vendor",
+        "node_modules",
+        ".git",
+        ".vscode",
+        ".DS_Store",
+        "__temp_update_clone"
+    ],
+    "strategy": "symlink",
+    "keep_releases": 5,
+    "shared_files": [
+        ".env"
+    ],
+    "shared_dirs": [
+        "storage"
+    ],
+    "last_shipped_at": "2026-08-27 06:36:45"
 }

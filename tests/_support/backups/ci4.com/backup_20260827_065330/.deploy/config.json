@@ -1,0 +1,34 @@
+{
+    "adapter": "ci4",
+    "server": "directadmin",
+    "gitRepoUrl": "/home/ian/Desktop/Packages/shipit/package/tests/_support/repos/ci4",
+    "branch": "master",
+    "user": "ian",
+    "group": "ian",
+    "ownership": [
+        "public",
+        "public_html",
+        "private_html"
+    ],
+    "symlinks": [
+        [
+            "public",
+            "public_html"
+        ],
+        [
+            "public_html",
+            "private_html"
+        ]
+    ],
+    "writable": [
+        "storage",
+        "bootstrap/cache",
+        "writable"
+    ],
+    "backup_path": "/home/ian/Desktop/Packages/shipit/package/tests/_support/backups/ci4.com",
+    "backup_retention": 5,
+    "hooks": {
+        "pre-update": "echo \"Entering maintenance mode...\"",
+        "post-update": "echo \"Leaving maintenance mode...\""
+    }
+}
