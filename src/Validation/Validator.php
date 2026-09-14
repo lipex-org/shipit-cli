@@ -45,13 +45,8 @@ class Validator
      * 
      * @return bool True if there are no errors, false otherwise.
      */
-    public function displayResults(array $results): bool
+    public function displayResults(array $results, bool $verbose = true): bool
     {
-        if (empty($results)) {
-            $this->ui->success("✅ Configuration validation passed.");
-            return true;
-        }
-
         $hasError = false;
         $tableData = [];
 
@@ -69,11 +64,20 @@ class Validator
             ];
         }
 
-        $this->ui->info("\nConfiguration Validation Results:");
-        $this->ui->table(
-            ['Rule', 'Status', 'Message', 'Suggestion'],
-            $tableData
-        );
+        if (empty($results)) {
+            if ($verbose) {
+                $this->ui->success("✅ Configuration validation passed.");
+            }
+            return true;
+        }
+
+        if ($hasError || $verbose) {
+            $this->ui->info("\nConfiguration Validation Results:");
+            $this->ui->table(
+                ['Rule', 'Status', 'Message', 'Suggestion'],
+                $tableData
+            );
+        }
 
         return !$hasError;
     }

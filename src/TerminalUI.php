@@ -6,6 +6,18 @@ namespace ShipIt;
 
 class TerminalUI
 {
+    private bool $verbose = false;
+
+    public function setVerbose(bool $verbose): void
+    {
+        $this->verbose = $verbose;
+    }
+
+    public function isVerbose(): bool
+    {
+        return $this->verbose;
+    }
+
     public function color(string $text, string $code): string
     {
         return $code . $text . "\033[0m";
@@ -29,6 +41,34 @@ class TerminalUI
     public function warning(string $msg): void
     {
         echo $this->color("⚠️  " . $msg . "\n", "\033[33m");
+    }
+
+    public function verbose(string $msg, string $level = 'info'): void
+    {
+        if (!$this->verbose) {
+            return;
+        }
+
+        match ($level) {
+            'success' => $this->success($msg),
+            'error' => $this->error($msg),
+            'warning' => $this->warning($msg),
+            default => $this->info($msg),
+        };
+    }
+
+    public function debug(string $msg): void
+    {
+        if ($this->verbose) {
+            $this->info($msg);
+        }
+    }
+
+    public function verboseOnly(callable $callback): void
+    {
+        if ($this->verbose) {
+            $callback();
+        }
     }
 
     public function table(array $headers, array $rows): void

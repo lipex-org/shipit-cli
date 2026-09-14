@@ -102,7 +102,9 @@ class TaskRunner
                     }
                 }
             } else {
-                $this->ui->info("⏭️  Skipped $taskName");
+                if ($this->ui->isVerbose()) {
+                    $this->ui->info("⏭️  Skipped $taskName");
+                }
             }
         }
     }

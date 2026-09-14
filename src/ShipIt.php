@@ -41,6 +41,7 @@ class ShipIt
 
     private array $config = [];
     private bool $dryRun = false;
+    private bool $verbose = false;
     private bool $log = false;
     private array $ignoreList = [];
     private array $onlyList = [];
@@ -118,14 +119,14 @@ class ShipIt
 
         $cmd = 'deploy';
         foreach (array_slice($argv, 1) as $arg) {
-            if (!str_starts_with($arg, '--')) {
+            if (!str_starts_with($arg, '--') && $arg !== '-v' && $arg !== '-V') {
                 $cmd = $arg;
                 break;
             }
         }
         $this->currentCmd = $cmd;
 
-        if ($cmd !== 'config' && $cmd !== 'version' && !in_array('--version', $argv, true) && !in_array('-v', $argv, true)) {
+        if ($this->verbose && $cmd !== 'config' && $cmd !== 'version' && !in_array('--version', $argv, true) && !in_array('-V', $argv, true)) {
             $this->printLogo();
         }
 
@@ -196,7 +197,7 @@ class ShipIt
                 $this->applyServerProfile();
 
                 $results = $this->validator->validate($this->config, $this->rootDir);
-                $isValid = $this->validator->displayResults($results);
+                $isValid = $this->validator->displayResults($results, $this->verbose);
 
                 if (!$isValid) {
                     $this->ui->error("\nAborting deployment due to configuration errors.");
@@ -219,7 +220,7 @@ class ShipIt
 
         if ($cmd === 'validate') {
             $results = $this->validator->validate($this->config, $this->rootDir);
-            $this->validator->displayResults($results);
+            $this->validator->displayResults($results, true);
             return;
         }
 
@@ -312,8 +313,15 @@ class ShipIt
         }
         $escaped = escapeshellarg($this->activeDir);
         $fullCmd = "cd $escaped && $cmd 2>&1";
-        $this->ui->info("⚙️  Running $label...");
+        if ($this->ui->isVerbose()) {
+            $this->ui->info("⚙️  Running $label ($cmd)...");
+        } else {
+            $this->ui->info("⚙️  Running $label...");
+        }
         $output = shell_exec($fullCmd);
+        if ($this->ui->isVerbose() && $output !== null && trim((string)$output) !== '') {
+            echo trim((string)$output) . "\n";
+        }
         if ($output === null && !$ignoreError) {
             $this->ui->error("$label failed");
         } else {
@@ -326,6 +334,8 @@ class ShipIt
         $this->dryRun = in_array('--dry-run', $argv, true);
         $this->log = in_array('--log', $argv, true);
         $this->updateSelf = in_array('--self', $argv, true);
+        $this->verbose = in_array('--verbose', $argv, true) || in_array('-v', $argv, true);
+        $this->ui->setVerbose($this->verbose);
 
         // Parse --only and --ignore
         foreach ($argv as $arg) {
@@ -338,9 +348,12 @@ class ShipIt
             } elseif ($arg === '--help') {
                 $this->showHelp();
                 exit(0);
-            } elseif ($arg === '--version' || $arg === '-v') {
+            } elseif ($arg === '--version' || $arg === '-V') {
                 $this->showVersion();
                 exit(0);
+            } elseif ($arg === '--verbose' || $arg === '-v') {
+                $this->verbose = true;
+                $this->ui->setVerbose(true);
             } elseif (str_starts_with($arg, '--log-id=')) {
                 $this->logId = substr($arg, 9);
             } elseif (str_starts_with($arg, '--user=')) {
@@ -458,11 +471,11 @@ class ShipIt
         $this->loadConfig();
         $backupRoot = $this->config['backup_path'] ?? null;
         if ($backupRoot && !is_dir($backupRoot) && !$this->dryRun) {
-            $this->ui->info("Attempting to create backup directory: $backupRoot");
+            $this->ui->verbose("Attempting to create backup directory: $backupRoot");
             if (!@mkdir($backupRoot, 0777, true) && !is_dir($backupRoot)) {
                 $this->ui->warning("⚠️  Could not create backup directory at $backupRoot. You may need to create it manually or check permissions.");
             } else {
-                $this->ui->success("Created backup directory: $backupRoot");
+                $this->ui->verbose("Created backup directory: $backupRoot", 'success');
             }
         }
 
@@ -558,7 +571,7 @@ PHP;
             if (!is_dir($this->activeDir)) {
                 @mkdir($this->activeDir, 0777, true);
             }
-            $this->ui->info("📥 Pre-cloning $gitRepoUrl (branch: $branch) to release folder");
+            $this->ui->verbose("📥 Pre-cloning $gitRepoUrl (branch: $branch) to release folder");
             exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($this->activeDir), $out, $status);
             if ($status !== 0) {
                 throw new \RuntimeException("Pre-clone failed.");
@@ -567,7 +580,7 @@ PHP;
             if (is_dir($cloneTarget)) {
                 $this->fs->removeFolder($cloneTarget);
             }
-            $this->ui->info("📥 Pre-cloning $gitRepoUrl (branch: $branch)");
+            $this->ui->verbose("📥 Pre-cloning $gitRepoUrl (branch: $branch)");
             exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($cloneTarget), $out, $status);
             if ($status !== 0) {
                 throw new \RuntimeException("Pre-clone failed.");
@@ -608,7 +621,7 @@ PHP;
         }
 
         if (file_put_contents($path, $content) !== false) {
-            $this->ui->success("Created: $path");
+            $this->ui->verbose("Created: $path", 'success');
         } else {
             $this->ui->error("Failed to write to $path");
         }
@@ -616,7 +629,7 @@ PHP;
 
     private function initConfigFile(bool $force, ?string $gitUrl = null, string $branch = 'main', string $user = 'admin'): void
     {
-        $this->ui->info("Creating standard config.json...");
+        $this->ui->verbose("Creating standard config.json...");
         $defaultConfig = [
             'adapter' => 'laravel',
             'server' => 'directadmin',
@@ -726,9 +739,9 @@ PHP;
         $this->runner->addTask('perms', fn() => $this->fixPermissions());
         $this->runner->addTask('symlink', fn() => $this->createSymlinks());
 
-        $this->runner->addPreHook('update', fn() => $this->ui->info("🔒 Entering maintenance mode..."));
-        $this->runner->addPostHook('update', fn() => $this->ui->info("🔓 Leaving maintenance mode..."));
-        $this->runner->addPostHook('composer', fn() => $this->ui->success("🚀 Composer done, autoloader optimized."));
+        $this->runner->addPreHook('update', fn() => $this->ui->verbose("🔒 Entering maintenance mode..."));
+        $this->runner->addPostHook('update', fn() => $this->ui->verbose("🔓 Leaving maintenance mode..."));
+        $this->runner->addPostHook('composer', fn() => $this->ui->verbose("🚀 Composer done, autoloader optimized.", 'success'));
     }
 
     private function applyConfigHooks(): void
@@ -826,7 +839,7 @@ PHP;
     {
         $nodePM = new NodePackageManager($this->activeDir);
         if (!$nodePM->hasPackageJson()) {
-            $this->ui->info("Skipping node package installation & build (no package.json found).");
+            $this->ui->verbose("Skipping node package installation & build (no package.json found).");
             return;
         }
 
@@ -933,7 +946,7 @@ PHP;
     private function doBackup(): void
     {
         if ($this->isFirstRun()) {
-            $this->ui->info("⏩ Skipping backup: project directory appears to be empty or contains only deployment files.");
+            $this->ui->verbose("⏩ Skipping backup: project directory appears to be empty or contains only deployment files.");
             return;
         }
 
@@ -942,7 +955,7 @@ PHP;
         $backupFolder = "$backupRoot/backup_$timestamp";
 
         if (!$this->dryRun && !is_dir($backupRoot)) {
-            $this->ui->info("Creating backup directory: $backupRoot");
+            $this->ui->verbose("Creating backup directory: $backupRoot");
             if (!@mkdir($backupRoot, 0777, true) && !is_dir($backupRoot)) {
                 $this->ui->error("❌ Failed to create backup directory: $backupRoot. Please check permissions.");
                 return;
@@ -956,7 +969,7 @@ PHP;
             }
         }
 
-        $this->ui->info("📁 Backup started to $backupRoot ...");
+        $this->ui->verbose("📁 Backup started to $backupRoot ...");
         $ignoreList = $this->backupIgnoreList;
         if (($this->config['strategy'] ?? 'copy') === 'symlink') {
             $ignoreList = array_unique(array_merge($ignoreList, ['releases', 'shared', 'current']));
@@ -990,7 +1003,7 @@ PHP;
         }
 
         if (($this->config['strategy'] ?? 'copy') === 'symlink') {
-            $this->ui->info("📥 Cloning $gitRepoUrl (branch: $branch) to release folder");
+            $this->ui->verbose("📥 Cloning $gitRepoUrl (branch: $branch) to release folder");
             if (!$this->dryRun && !$this->preCloned) {
                 if (!is_dir($this->activeDir)) {
                     mkdir($this->activeDir, 0777, true);
@@ -1008,7 +1021,7 @@ PHP;
                 $this->fs->removeFolder($cloneFolder);
             }
 
-            $this->ui->info("📥 Cloning $gitRepoUrl (branch: $branch)");
+            $this->ui->verbose("📥 Cloning $gitRepoUrl (branch: $branch)");
             if (!$this->dryRun && !$this->preCloned) {
                 exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($cloneFolder), $out, $status);
                 if ($status !== 0) {
@@ -1016,10 +1029,10 @@ PHP;
                 }
             }
 
-            $this->ui->info("🔄 Updating project...");
+            $this->ui->verbose("🔄 Updating project...");
             $isFirstRun = $this->isFirstRun();
             if ($isFirstRun) {
-                $this->ui->info("✨ First run detected: copying all files from repository.");
+                $this->ui->verbose("✨ First run detected: copying all files from repository.");
             }
 
             $this->fs->copyFolder($cloneFolder, $this->rootDir, $this->updateIgnoreList, '', $this->log, $isFirstRun);
@@ -1082,7 +1095,7 @@ PHP;
                 return;
             }
 
-            $this->ui->info("⏪ Rolling back symlink to $target ...");
+            $this->ui->verbose("⏪ Rolling back symlink to $target ...");
             if (!$this->dryRun) {
                 $tempLink = $this->rootDir . '/current_temp';
                 if (file_exists($tempLink) || is_link($tempLink)) {
@@ -1140,7 +1153,7 @@ PHP;
             return;
         }
 
-        $this->ui->info("⏪ Rolling back to $target ...");
+        $this->ui->verbose("⏪ Rolling back to $target ...");
         $this->fs->copyFolder($target, $this->rootDir, [], '', $this->log, true);
         $this->ui->success("Rollback completed successfully.");
         $this->updateGlobalRegistry('success');
@@ -1186,7 +1199,7 @@ PHP;
         $toDeleteCount = count($backups) - $retention;
 
         for ($i = 0; $i < $toDeleteCount; $i++) {
-            $this->ui->info("🗑️ Rotating old backup: " . basename($backups[$i]));
+            $this->ui->verbose("🗑️ Rotating old backup: " . basename($backups[$i]));
             $this->fs->removeFolder($backups[$i]);
         }
     }
@@ -1194,11 +1207,13 @@ PHP;
     private function fixPermissions(): void
     {
         if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-            $this->ui->info("⏩ Skipping file permissions adjustments on Windows environment.");
+            $this->ui->verbose("⏩ Skipping file permissions adjustments on Windows environment.");
             return;
         }
         $user = $this->config['user'] ?? null;
         $group = $this->config['group'] ?? null;
+
+        $applied = false;
 
         // 1. Chown
         if ($user || $group) {
@@ -1206,13 +1221,21 @@ PHP;
             foreach ($ownership as $path) {
                 $fullPath = $this->activeDir . '/' . $path;
                 if (file_exists($fullPath)) {
+                    $applied = true;
                     $cmd = "chown -R ";
                     if ($user)
                         $cmd .= escapeshellarg($user);
                     if ($group)
                         $cmd .= ":" . escapeshellarg($group);
                     $cmd .= " " . escapeshellarg($fullPath);
-                    $this->runCommand("Apply Ownership ($path)", $cmd, true);
+                    if ($this->ui->isVerbose()) {
+                        $this->runCommand("Apply Ownership ($path)", $cmd, true);
+                    } else {
+                        if (!$this->dryRun) {
+                            $escaped = escapeshellarg($this->activeDir);
+                            @exec("cd $escaped && $cmd 2>&1");
+                        }
+                    }
                 }
             }
         }
@@ -1222,7 +1245,24 @@ PHP;
         foreach ($writable as $path) {
             $fullPath = $this->activeDir . '/' . $path;
             if (file_exists($fullPath)) {
-                $this->runCommand("Apply Writable Perms ($path)", "chmod -R 775 " . escapeshellarg($fullPath), true);
+                $applied = true;
+                $cmd = "chmod -R 775 " . escapeshellarg($fullPath);
+                if ($this->ui->isVerbose()) {
+                    $this->runCommand("Apply Writable Perms ($path)", $cmd, true);
+                } else {
+                    if (!$this->dryRun) {
+                        $escaped = escapeshellarg($this->activeDir);
+                        @exec("cd $escaped && $cmd 2>&1");
+                    }
+                }
+            }
+        }
+
+        if (!$this->ui->isVerbose() && $applied) {
+            if ($this->dryRun) {
+                $this->ui->info("[Dry Run] Would configure permissions and ownership");
+            } else {
+                $this->ui->success("Permissions and ownership configured");
             }
         }
     }
@@ -1230,6 +1270,7 @@ PHP;
     private function createSymlinks(): void
     {
         $symlinks = (array) ($this->config['symlinks'] ?? []);
+        $createdCount = 0;
         foreach ($symlinks as $pair) {
             if (!is_array($pair) || count($pair) !== 2)
                 continue;
@@ -1251,20 +1292,34 @@ PHP;
                         @unlink($fullDest);
                     }
                 } else {
-                    $this->runCommand("Remove existing target ($dest)", "rm -rf " . escapeshellarg($fullDest), true);
+                    if ($this->ui->isVerbose()) {
+                        $this->runCommand("Remove existing target ($dest)", "rm -rf " . escapeshellarg($fullDest), true);
+                    } else {
+                        @exec("rm -rf " . escapeshellarg($fullDest));
+                    }
                 }
             }
 
             if ($this->dryRun) {
-                $this->ui->info("[Dry Run] Would create symlink: $fullSrc -> $fullDest");
+                if ($this->ui->isVerbose()) {
+                    $this->ui->info("[Dry Run] Would create symlink: $fullSrc -> $fullDest");
+                }
+                $createdCount++;
                 continue;
             }
 
             if ($this->createSymlink($fullSrc, $fullDest)) {
-                $this->ui->success("Created Symlink ($src -> $dest)");
+                $createdCount++;
+                if ($this->ui->isVerbose()) {
+                    $this->ui->success("Created Symlink ($src -> $dest)");
+                }
             } else {
                 $this->ui->error("Failed to create Symlink ($src -> $dest)");
             }
+        }
+
+        if (!$this->ui->isVerbose() && $createdCount > 0) {
+            $this->ui->success("Symlinks created");
         }
     }
 
@@ -1282,8 +1337,9 @@ PHP;
             return;
         }
 
-        $this->ui->info("🔗 Creating root directory entrypoint symlinks...");
+        $this->ui->verbose("🔗 Creating root directory entrypoint symlinks...");
 
+        $createdCount = 0;
         foreach ($rootSymlinks as $pair) {
             if (!is_array($pair) || count($pair) !== 2)
                 continue;
@@ -1312,20 +1368,34 @@ PHP;
                         @unlink($fullLink);
                     }
                 } else {
-                    $this->runCommand("Remove existing target ($linkName)", "rm -rf " . escapeshellarg($fullLink), true);
+                    if ($this->ui->isVerbose()) {
+                        $this->runCommand("Remove existing target ($linkName)", "rm -rf " . escapeshellarg($fullLink), true);
+                    } else {
+                        @exec("rm -rf " . escapeshellarg($fullLink));
+                    }
                 }
             }
 
             if ($this->dryRun) {
-                $this->ui->info("[Dry Run] Would create root symlink: $target -> $fullLink");
+                if ($this->ui->isVerbose()) {
+                    $this->ui->info("[Dry Run] Would create root symlink: $target -> $fullLink");
+                }
+                $createdCount++;
                 continue;
             }
 
             if ($this->createSymlink($target, $fullLink)) {
-                $this->ui->success("Created Root Symlink ($target -> $linkName)");
+                $createdCount++;
+                if ($this->ui->isVerbose()) {
+                    $this->ui->success("Created Root Symlink ($target -> $linkName)");
+                }
             } else {
                 $this->ui->error("Failed to create Root Symlink ($target -> $linkName)");
             }
+        }
+
+        if (!$this->ui->isVerbose() && $createdCount > 0) {
+            $this->ui->success("Root symlinks created");
         }
     }
 
@@ -1475,7 +1545,7 @@ PHP;
         $entry = "[$date] User: $user@$host | Project: $project | Command: $cmd" . PHP_EOL;
 
         if ($this->dryRun) {
-            $this->ui->info("[Dry Run] Would log execution: " . trim($entry));
+            $this->ui->verbose("[Dry Run] Would log execution: " . trim($entry));
             return;
         }
 
@@ -1692,7 +1762,7 @@ PHP;
             return;
         }
 
-        $this->ui->info("Checking global registry for dead project paths...");
+        $this->ui->verbose("Checking global registry for dead project paths...");
 
         $fp = fopen($this->globalConfigFile, 'c+');
         if (!$fp) {
@@ -1728,7 +1798,7 @@ PHP;
 
             if (!empty($prunedPaths)) {
                 foreach ($prunedPaths as $p) {
-                    $this->ui->warning("🗑️  Pruning non-existent project: $p");
+                    $this->ui->verbose("🗑️  Pruning non-existent project: $p", 'warning');
                 }
                 ftruncate($fp, 0);
                 rewind($fp);
@@ -1763,6 +1833,7 @@ PHP;
         $this->ui->info("  config           View or update configuration keys");
         $this->ui->info("  version          Show current ShipIt version\n");
         $this->ui->info("Options:");
+        $this->ui->info("  --verbose, -v    Display detailed execution output");
         $this->ui->info("  --dry-run        Show what would be done without making changes");
         $this->ui->info("  --only=task1,task2 Only run specific tasks");
         $this->ui->info("  --ignore=task1   Skip specific tasks");
@@ -2036,7 +2107,7 @@ PHP;
         if (count($releases) > $keep) {
             $toDelete = array_slice($releases, 0, count($releases) - $keep);
             foreach ($toDelete as $folder) {
-                $this->ui->info("🗑️ Pruning old release: " . basename($folder));
+                $this->ui->verbose("🗑️ Pruning old release: " . basename($folder));
                 $this->fs->removeFolder($folder);
             }
         }
@@ -2129,5 +2200,32 @@ PHP;
     public function getAdapters(): array
     {
         return $this->adapters;
+    }
+
+    public function setVerbose(bool $verbose): void
+    {
+        $this->verbose = $verbose;
+        $this->ui->setVerbose($verbose);
+    }
+
+    public function isVerbose(): bool
+    {
+        return $this->verbose;
+    }
+
+    public function getUI(): TerminalUI
+    {
+        return $this->ui;
+    }
+
+    public function setUI(TerminalUI $ui): void
+    {
+        $this->ui = $ui;
+        $this->ui->setVerbose($this->verbose);
+        $this->runner = new TaskRunner($this->ui);
+        $this->validator = new Validator($this->ui);
+        if (isset($this->fs)) {
+            $this->fs = new Filesystem($this->ui, $this->dryRun);
+        }
     }
 }

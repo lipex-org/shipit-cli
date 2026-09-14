@@ -71,6 +71,7 @@ shipit
 - `shipit rollback` - Clears the current project (preserving `.deploy` and `.git`), restores the last backup, and runs post-deployment tasks (composer, npm, etc.).
 - `shipit config` - Manage project or global configuration.
 - `shipit list` - Display all available deployment tasks.
+- `shipit --verbose` or `shipit -v` - Display detailed execution output, ASCII banner, skipped tasks, and command logs (by default, ShipIt runs in concise mode with minimal output).
 - `shipit --dry-run` - Simulate the deployment/rollback process.
 - `shipit --log` - Show detailed file copy operations.
 
