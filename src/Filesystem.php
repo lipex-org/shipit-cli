@@ -146,6 +146,10 @@ class Filesystem
             $this->ui->info("[Dry Run] Would remove: $dir");
             return;
         }
+        if (is_link($dir)) {
+            @unlink($dir);
+            return;
+        }
         if (!is_dir($dir))
             return;
 
@@ -160,7 +164,9 @@ class Filesystem
         $items = array_diff(scandir($dir) ?: [], ['.', '..']);
         foreach ($items as $item) {
             $path = $dir . DIRECTORY_SEPARATOR . $item;
-            if (is_dir($path)) {
+            if (is_link($path)) {
+                @unlink($path);
+            } elseif (is_dir($path)) {
                 $this->removeFolder($path);
             } else {
                 @unlink($path);
@@ -171,6 +177,10 @@ class Filesystem
 
     public function clearDirectory(string $dir, array $keep = []): void
     {
+        if (is_link($dir)) {
+            @unlink($dir);
+            return;
+        }
         if (!is_dir($dir))
             return;
 
@@ -180,7 +190,9 @@ class Filesystem
                 continue;
 
             $path = $dir . DIRECTORY_SEPARATOR . $item;
-            if (is_dir($path)) {
+            if (is_link($path)) {
+                @unlink($path);
+            } elseif (is_dir($path)) {
                 $this->removeFolder($path);
             } else {
                 if ($this->dryRun) {

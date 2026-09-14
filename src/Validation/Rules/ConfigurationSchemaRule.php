@@ -19,7 +19,8 @@ class ConfigurationSchemaRule implements ValidationRuleInterface
             'adapter', 'server', 'gitRepoUrl', 'branch', 'user', 'group',
             'ownership', 'symlinks', 'writable', 'backup_path', 'backup_retention',
             'hooks', 'update_ignore', 'backup_ignore', 'strategy', 'keep_releases',
-            'shared_files', 'shared_dirs', 'root_symlinks'
+            'shared_files', 'shared_dirs', 'root_symlinks', 'name', 'steps', 'commands',
+            'slack_webhook_url', 'discord_webhook_url', 'backup_env', 'version'
         ];
 
         // Check for unrecognized keys
@@ -30,12 +31,13 @@ class ConfigurationSchemaRule implements ValidationRuleInterface
             return [
                 'status' => 'warning',
                 'message' => sprintf("Unrecognized configuration key(s): %s", implode(', ', $unknownKeys)),
-                'suggestion' => "Verify spelling in config.json. Allowed keys: " . implode(', ', $allowedKeys)
+                'suggestion' => "Verify spelling in config file. Allowed keys: " . implode(', ', $allowedKeys)
             ];
         }
 
         // Validate types
         $typeChecks = [
+            'name' => ['string'],
             'adapter' => ['string', 'null'],
             'server' => ['string', 'null'],
             'gitRepoUrl' => ['string', 'null'],
@@ -48,6 +50,8 @@ class ConfigurationSchemaRule implements ValidationRuleInterface
             'backup_path' => ['string'],
             'backup_retention' => ['integer'],
             'hooks' => ['array'],
+            'steps' => ['array'],
+            'commands' => ['array'],
             'update_ignore' => ['array'],
             'backup_ignore' => ['array'],
             'strategy' => ['string'],
@@ -55,6 +59,10 @@ class ConfigurationSchemaRule implements ValidationRuleInterface
             'shared_files' => ['array'],
             'shared_dirs' => ['array'],
             'root_symlinks' => ['array'],
+            'slack_webhook_url' => ['string', 'null'],
+            'discord_webhook_url' => ['string', 'null'],
+            'backup_env' => ['boolean'],
+            'version' => ['string', 'integer', 'float'],
         ];
 
         foreach ($typeChecks as $key => $types) {

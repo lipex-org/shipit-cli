@@ -66,7 +66,7 @@ class Validator
 
         if (empty($results)) {
             if ($verbose) {
-                $this->ui->success("✅ Configuration validation passed.");
+                $this->ui->success("Configuration validation passed.");
             }
             return true;
         }

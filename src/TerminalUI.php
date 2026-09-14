@@ -7,6 +7,52 @@ namespace ShipIt;
 class TerminalUI
 {
     private bool $verbose = false;
+    private Spinner $spinner;
+
+    public function __construct(?Spinner $spinner = null)
+    {
+        $this->spinner = $spinner ?? new Spinner();
+    }
+
+    public function getSpinner(): Spinner
+    {
+        return $this->spinner;
+    }
+
+    public function setSpinner(Spinner $spinner): void
+    {
+        $this->spinner = $spinner;
+    }
+
+    public function step(string $msg): void
+    {
+        if ($this->verbose) {
+            $this->info("⚙️  " . $msg);
+            return;
+        }
+
+        if ($this->spinner->isActive()) {
+            $this->spinner->setMessage($msg);
+        } else {
+            $this->spinner->start($msg);
+        }
+    }
+
+    public function stepSuccess(string $msg): void
+    {
+        if ($this->spinner->isActive()) {
+            $this->spinner->stop();
+        }
+        $this->success($msg);
+    }
+
+    public function stepError(string $msg): void
+    {
+        if ($this->spinner->isActive()) {
+            $this->spinner->stop();
+        }
+        $this->error($msg);
+    }
 
     public function setVerbose(bool $verbose): void
     {
@@ -25,21 +71,39 @@ class TerminalUI
 
     public function success(string $msg): void
     {
+        if (isset($this->spinner) && $this->spinner->isActive()) {
+            $this->spinner->stop();
+        }
         echo $this->color("✅ " . $msg . "\n", "\033[32m");
     }
 
     public function error(string $msg): void
     {
+        if (isset($this->spinner) && $this->spinner->isActive()) {
+            $this->spinner->stop();
+        }
         echo $this->color("❌ " . $msg . "\n", "\033[31m");
     }
 
     public function info(string $msg): void
     {
+        if (isset($this->spinner) && $this->spinner->isActive()) {
+            $this->spinner->clear();
+            echo $this->color("ℹ️  " . $msg . "\n", "\033[36m");
+            $this->spinner->render();
+            return;
+        }
         echo $this->color("ℹ️  " . $msg . "\n", "\033[36m");
     }
 
     public function warning(string $msg): void
     {
+        if (isset($this->spinner) && $this->spinner->isActive()) {
+            $this->spinner->clear();
+            echo $this->color("⚠️  " . $msg . "\n", "\033[33m");
+            $this->spinner->render();
+            return;
+        }
         echo $this->color("⚠️  " . $msg . "\n", "\033[33m");
     }
 
@@ -73,6 +137,9 @@ class TerminalUI
 
     public function table(array $headers, array $rows): void
     {
+        if (isset($this->spinner) && $this->spinner->isActive()) {
+            $this->spinner->stop();
+        }
         $colWidths = [];
         foreach ($headers as $i => $h) {
             $colWidths[$i] = mb_strlen($h);

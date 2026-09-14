@@ -19,6 +19,7 @@ use ShipIt\Validation\Rules\SystemUserRule;
 use ShipIt\Validation\Rules\AdapterExistsRule;
 use ShipIt\Validation\Rules\GlobalRegistryRule;
 use ShipIt\Validation\Rules\ConfigurationSchemaRule;
+use Symfony\Component\Yaml\Yaml;
 
 class ShipIt
 {
@@ -32,12 +33,14 @@ class ShipIt
     private string $rootDir;
     private string $deployDir;
     private string $configFile;
+    private string $stateFile;
     private string $globalConfigFile;
     private string $activeDir;
     private string $releasesDir;
     private string $sharedDir;
     private string $currentSymlink;
     private array $adapters = [];
+    private int $lastExitCode = 0;
 
     private array $config = [];
     private bool $dryRun = false;
@@ -77,7 +80,55 @@ class ShipIt
     private function initPaths(): void
     {
         $this->deployDir = $this->rootDir . '/.deploy';
-        $this->configFile = $this->deployDir . '/config.json';
+        $this->configFile = $this->findConfigFile($this->rootDir) ?: ($this->deployDir . '/config.json');
+        $this->stateFile = $this->deployDir . '/state.json';
+    }
+
+    public function findConfigFile(string $dir): ?string
+    {
+        $candidates = [
+            $dir . '/.shipit.yml',
+            $dir . '/.shipit.yaml',
+            $dir . '/shipit.yml',
+            $dir . '/shipit.yaml',
+            $dir . '/config.yml',
+            $dir . '/config.yaml',
+            $dir . '/config.json',
+            $dir . '/.deploy/config.yml',
+            $dir . '/.deploy/config.yaml',
+            $dir . '/.deploy/config.json',
+            $dir . '/.deploy/shipit.yml',
+            $dir . '/.deploy/shipit.yaml',
+        ];
+
+        foreach ($candidates as $candidate) {
+            if (file_exists($candidate) && is_file($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    public function parseConfigFile(string $file): array
+    {
+        if (!file_exists($file)) {
+            return [];
+        }
+
+        $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+        if ($ext === 'yml' || $ext === 'yaml') {
+            try {
+                $parsed = Yaml::parseFile($file);
+                return is_array($parsed) ? $parsed : [];
+            } catch (\Throwable $e) {
+                $this->ui->error("Error parsing YAML config file '$file': " . $e->getMessage());
+                return [];
+            }
+        }
+
+        $content = file_get_contents($file);
+        return json_decode($content ?: '', true) ?: [];
     }
 
     private function setupValidator(): void
@@ -184,11 +235,14 @@ class ShipIt
             'list',
             'status',
             'make:adapter',
-            'adapter:create'
+            'adapter:create',
+            'once:list',
+            'once:reset',
         ], true);
 
         if ($isDeploy) {
             try {
+                $this->ui->step("Preparing deployment environment...");
                 if (!$this->ignoreAll) {
                     $this->preCloneRepository();
                 }
@@ -196,6 +250,7 @@ class ShipIt
                 $this->applyAdapter();
                 $this->applyServerProfile();
 
+                $this->ui->step("Validating configuration...");
                 $results = $this->validator->validate($this->config, $this->rootDir);
                 $isValid = $this->validator->displayResults($results, $this->verbose);
 
@@ -245,11 +300,19 @@ class ShipIt
             $this->doStatus();
             return;
         }
+        if ($cmd === 'once:list') {
+            $this->doOnceList();
+            return;
+        }
+        if ($cmd === 'once:reset') {
+            $this->doOnceReset($argv);
+            return;
+        }
     }
 
     private function doDeploy(): void
     {
-        $runOrder = ['backup', 'update', 'composer', 'nodejs', 'symlink', 'perms'];
+        $runOrder = ['backup', 'update', 'composer', 'nodejs', 'steps', 'symlink', 'perms'];
         if (!empty($this->adapterRunOrderRules)) {
             $runOrder = $this->runner->mergeRunOrder($runOrder, $this->adapterRunOrderRules);
         }
@@ -282,6 +345,7 @@ class ShipIt
         }
 
         try {
+            $this->runPreDeployHook();
             $this->runner->run($runOrder, $this->ignoreList, $this->onlyList, $this->ignoreAll, $this);
 
             if (($this->config['strategy'] ?? 'copy') === 'symlink') {
@@ -290,6 +354,8 @@ class ShipIt
                 $this->pruneReleases();
             }
 
+            $this->runPostDeployHook();
+
             if (!$this->dryRun) {
                 $this->config['last_shipped_at'] = date('Y-m-d H:i:s');
                 file_put_contents($this->configFile, json_encode($this->config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
@@ -297,7 +363,7 @@ class ShipIt
             }
 
             $this->sendNotification("🚀 Deployment successful for project " . basename($this->rootDir) . " on branch " . ($this->config['branch'] ?? 'main'));
-            $this->ui->success("\n✅ Deployment completed successfully.");
+            $this->ui->success("Deployment completed successfully.");
         } catch (\Throwable $e) {
             $this->sendNotification("❌ Deployment failed for project " . basename($this->rootDir) . ": " . $e->getMessage());
             $this->updateGlobalRegistry('failed');
@@ -308,24 +374,101 @@ class ShipIt
     public function runCommand(string $label, string $cmd, bool $ignoreError = false): void
     {
         if ($this->dryRun) {
-            $this->ui->info("[Dry Run] Would run: $label ($cmd)");
+            $this->lastExitCode = 0;
+            if ($this->ui->isVerbose()) {
+                $this->ui->info("[Dry Run] Would run: $label ($cmd)");
+            } else {
+                $this->ui->step("[Dry Run] Would run: $label");
+            }
             return;
         }
+
         $escaped = escapeshellarg($this->activeDir);
         $fullCmd = "cd $escaped && $cmd 2>&1";
+
         if ($this->ui->isVerbose()) {
             $this->ui->info("⚙️  Running $label ($cmd)...");
-        } else {
-            $this->ui->info("⚙️  Running $label...");
+            $output = shell_exec($fullCmd);
+            if ($output !== null && trim((string)$output) !== '') {
+                echo trim((string)$output) . "\n";
+            }
+            if ($output === null && !$ignoreError) {
+                $this->lastExitCode = 1;
+                $this->ui->error("$label failed");
+            } else {
+                $this->lastExitCode = 0;
+                $this->ui->success("$label done");
+            }
+            return;
         }
-        $output = shell_exec($fullCmd);
-        if ($this->ui->isVerbose() && $output !== null && trim((string)$output) !== '') {
-            echo trim((string)$output) . "\n";
+
+        $this->ui->step("Running $label...");
+
+        if (!function_exists('proc_open')) {
+            $output = shell_exec($fullCmd);
+            $this->lastExitCode = ($output === null) ? 1 : 0;
+            if ($output === null && !$ignoreError) {
+                $this->ui->error("$label failed");
+            }
+            return;
         }
-        if ($output === null && !$ignoreError) {
-            $this->ui->error("$label failed");
-        } else {
-            $this->ui->success("$label done");
+
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w']
+        ];
+        $process = @proc_open($fullCmd, $descriptors, $pipes);
+
+        if (!is_resource($process)) {
+            $output = shell_exec($fullCmd);
+            $this->lastExitCode = ($output === null) ? 1 : 0;
+            if ($output === null && !$ignoreError) {
+                $this->ui->error("$label failed");
+            }
+            return;
+        }
+
+        fclose($pipes[0]);
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+
+        $output = '';
+        while (true) {
+            $status = proc_get_status($process);
+            $stdoutChunk = stream_get_contents($pipes[1]);
+            if ($stdoutChunk !== false && $stdoutChunk !== '') {
+                $output .= $stdoutChunk;
+            }
+            $stderrChunk = stream_get_contents($pipes[2]);
+            if ($stderrChunk !== false && $stderrChunk !== '') {
+                $output .= $stderrChunk;
+            }
+
+            if (!$status['running']) {
+                break;
+            }
+
+            $this->ui->getSpinner()->tick();
+            usleep(80000);
+        }
+
+        $stdoutChunk = stream_get_contents($pipes[1]);
+        if ($stdoutChunk !== false && $stdoutChunk !== '') {
+            $output .= $stdoutChunk;
+        }
+        $stderrChunk = stream_get_contents($pipes[2]);
+        if ($stderrChunk !== false && $stderrChunk !== '') {
+            $output .= $stderrChunk;
+        }
+
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exitCode = proc_close($process);
+        $this->lastExitCode = $exitCode;
+
+        if ($exitCode !== 0 && !$ignoreError) {
+            $this->ui->error("$label failed:\n" . trim($output));
         }
     }
 
@@ -365,6 +508,7 @@ class ShipIt
     public function loadConfig(bool $globalOnly = false): void
     {
         $defaultConfig = [
+            'name' => null,
             'adapter' => null,
             'server' => null,
             'gitRepoUrl' => null,
@@ -385,6 +529,8 @@ class ShipIt
                 'pre-update' => 'echo "Entering maintenance mode..."',
                 'post-update' => 'echo "Leaving maintenance mode..."',
             ],
+            'steps' => [],
+            'commands' => [],
             'update_ignore' => [
                 '.env',
                 '.deploy',
@@ -427,10 +573,26 @@ class ShipIt
         }
 
         // 2. Load project config
-        $projectConfig = [];
-        if (file_exists($this->configFile)) {
-            $projectConfig = json_decode(file_get_contents($this->configFile), true) ?: [];
+        $rootConfig = [];
+        $rootCandidate = $this->findConfigFile($this->rootDir);
+        if ($rootCandidate && !str_starts_with($rootCandidate, $this->deployDir)) {
+            $rootConfig = $this->parseConfigFile($rootCandidate);
+            $this->configFile = $rootCandidate;
         }
+
+        $deployConfig = [];
+        $deployCandidate = $this->findConfigFile($this->deployDir);
+        if ($deployCandidate) {
+            $deployConfig = $this->parseConfigFile($deployCandidate);
+            if (!$rootCandidate) {
+                $this->configFile = $deployCandidate;
+            }
+        } elseif (file_exists($this->deployDir . '/config.json')) {
+            $deployConfig = $this->parseConfigFile($this->deployDir . '/config.json');
+        }
+
+        // Merge: Default < Global Defaults < Root Config (.shipit.yml) < Deploy Config (.deploy/config.json)
+        $projectConfig = array_merge($rootConfig, $deployConfig);
 
         // 3. Merge: Default < Global Defaults < Project Config
         $this->config = array_merge($defaultConfig, $globalConfig, $projectConfig);
@@ -440,6 +602,7 @@ class ShipIt
 
     private function doInit(array $argv): void
     {
+        $this->ui->step("Initializing configuration files...");
         $force = in_array('--force', $argv, true);
         $gitUrl = null;
         $branch = 'main';
@@ -479,7 +642,7 @@ class ShipIt
             }
         }
 
-        $this->ui->success("\n✅ ShipIt initialized successfully in " . $this->deployDir);
+        $this->ui->success("ShipIt initialized successfully in " . $this->deployDir);
         $this->updateGlobalRegistry();
     }
 
@@ -536,7 +699,7 @@ class {$className} implements AdapterInterface
 PHP;
 
         $this->writeFile($targetFile, $content . PHP_EOL, true);
-        $this->ui->success("\n✅ Adapter skeleton created successfully at: " . $targetFile);
+        $this->ui->success("Adapter skeleton created successfully at: " . $targetFile);
         $this->ui->info("To use this adapter, configure \"adapter\": \"{$name}\" in your .deploy/config.json file.");
     }
 
@@ -567,6 +730,7 @@ PHP;
         }
 
         // Perform the pre-clone
+        $this->ui->step("Pre-cloning repository ($branch)...");
         if (($this->config['strategy'] ?? 'copy') === 'symlink') {
             if (!is_dir($this->activeDir)) {
                 @mkdir($this->activeDir, 0777, true);
@@ -589,10 +753,11 @@ PHP;
 
         $this->preCloned = true;
 
-        // Overlay repository-side config if present
-        $repoConfigFile = $this->transientDeployDir . '/config.json';
-        if (file_exists($repoConfigFile)) {
-            $repoConfig = json_decode(file_get_contents($repoConfigFile), true) ?: [];
+        // Overlay repository-side config if present (.shipit.yml, config.json, etc.)
+        $repoConfigFile = $this->findConfigFile($cloneTarget) 
+            ?: $this->findConfigFile($this->transientDeployDir);
+        if ($repoConfigFile) {
+            $repoConfig = $this->parseConfigFile($repoConfigFile);
 
             // Critical server-side keys to protect
             $protectedKeys = ['backup_path', 'user', 'group', 'webhook_token', 'webhook_secret', 'server', 'strategy', 'keep_releases'];
@@ -736,6 +901,7 @@ PHP;
         $this->runner->addTask('update', fn() => $this->doUpdate());
         $this->runner->addTask('composer', fn() => $this->runCommand('Composer Install', 'composer install --no-dev --optimize-autoloader', true));
         $this->runner->addTask('nodejs', fn() => $this->runNodePackageManager());
+        $this->runner->addTask('steps', fn() => $this->runCustomSteps());
         $this->runner->addTask('perms', fn() => $this->fixPermissions());
         $this->runner->addTask('symlink', fn() => $this->createSymlinks());
 
@@ -748,12 +914,39 @@ PHP;
     {
         $hooks = $this->config['hooks'] ?? [];
         foreach ($hooks as $key => $command) {
+            if ($key === 'pre-deploy' || $key === 'post-deploy') {
+                continue;
+            }
             if (str_starts_with($key, 'pre-')) {
                 $task = substr($key, 4);
                 $this->runner->addPreHook($task, fn() => $this->runCommand("Pre-hook for $task", $command, true));
             } elseif (str_starts_with($key, 'post-')) {
                 $task = substr($key, 5);
                 $this->runner->addPostHook($task, fn() => $this->runCommand("Post-hook for $task", $command, true));
+            }
+        }
+
+        // Apply any custom steps configured for specific task hooks
+        $hookStages = [
+            'pre-backup', 'post-backup',
+            'pre-update', 'post-update',
+            'pre-composer', 'post-composer',
+            'pre-nodejs', 'post-nodejs',
+            'pre-steps', 'post-steps',
+            'pre-symlink', 'post-symlink',
+            'pre-perms', 'post-perms',
+        ];
+        foreach ($hookStages as $stage) {
+            $stageSteps = $this->getCustomSteps($stage);
+            if (!empty($stageSteps)) {
+                [$type, $task] = explode('-', $stage, 2);
+                foreach ($stageSteps as $step) {
+                    if ($type === 'pre') {
+                        $this->runner->addPreHook($task, fn() => $this->executeStep($step));
+                    } else {
+                        $this->runner->addPostHook($task, fn() => $this->executeStep($step));
+                    }
+                }
             }
         }
     }
@@ -945,6 +1138,7 @@ PHP;
 
     private function doBackup(): void
     {
+        $this->ui->step("Creating backup...");
         if ($this->isFirstRun()) {
             $this->ui->verbose("⏩ Skipping backup: project directory appears to be empty or contains only deployment files.");
             return;
@@ -988,7 +1182,7 @@ PHP;
         }
 
         $this->fs->copyFolder($this->rootDir, $backupFolder, $ignoreList, '', $this->log);
-        $this->ui->success("Backup saved to $backupFolder");
+        $this->ui->verbose("Backup saved to $backupFolder", 'success');
 
         $this->rotateBackups();
     }
@@ -997,6 +1191,8 @@ PHP;
     {
         $gitRepoUrl = $this->config['gitRepoUrl'] ?? null;
         $branch = $this->config['branch'] ?? 'main';
+
+        $this->ui->step("Updating project files ($branch)...");
 
         if (!$gitRepoUrl) {
             throw new \RuntimeException("No gitRepoUrl set in config.json or via arguments.");
@@ -1013,7 +1209,7 @@ PHP;
                     throw new \RuntimeException("Git clone failed.");
                 }
             }
-            $this->ui->success("Release clone completed");
+            $this->ui->verbose("Release clone completed", 'success');
             $this->linkShared();
         } else {
             $cloneFolder = $this->rootDir . "/__temp_update_clone";
@@ -1039,12 +1235,13 @@ PHP;
             if (!$this->dryRun) {
                 $this->fs->removeFolder($cloneFolder);
             }
-            $this->ui->success("Update completed");
+            $this->ui->verbose("Update completed", 'success');
         }
     }
 
     private function doRollback(array $argv = []): void
     {
+        $this->ui->step("Rolling back project...");
         $this->runRollbackHook('pre-rollback');
         foreach ($this->adapters as $adapter) {
             if (method_exists($adapter, 'rollback')) {
@@ -1210,6 +1407,7 @@ PHP;
             $this->ui->verbose("⏩ Skipping file permissions adjustments on Windows environment.");
             return;
         }
+        $this->ui->step("Configuring permissions & ownership...");
         $user = $this->config['user'] ?? null;
         $group = $this->config['group'] ?? null;
 
@@ -1258,11 +1456,11 @@ PHP;
             }
         }
 
-        if (!$this->ui->isVerbose() && $applied) {
+        if ($applied) {
             if ($this->dryRun) {
-                $this->ui->info("[Dry Run] Would configure permissions and ownership");
+                $this->ui->verbose("[Dry Run] Would configure permissions and ownership");
             } else {
-                $this->ui->success("Permissions and ownership configured");
+                $this->ui->verbose("Permissions and ownership configured", 'success');
             }
         }
     }
@@ -1270,6 +1468,9 @@ PHP;
     private function createSymlinks(): void
     {
         $symlinks = (array) ($this->config['symlinks'] ?? []);
+        if (!empty($symlinks)) {
+            $this->ui->step("Configuring symlinks...");
+        }
         $createdCount = 0;
         foreach ($symlinks as $pair) {
             if (!is_array($pair) || count($pair) !== 2)
@@ -1318,8 +1519,8 @@ PHP;
             }
         }
 
-        if (!$this->ui->isVerbose() && $createdCount > 0) {
-            $this->ui->success("Symlinks created");
+        if ($createdCount > 0) {
+            $this->ui->verbose("Symlinks created", 'success');
         }
     }
 
@@ -1337,6 +1538,7 @@ PHP;
             return;
         }
 
+        $this->ui->step("Configuring root symlinks...");
         $this->ui->verbose("🔗 Creating root directory entrypoint symlinks...");
 
         $createdCount = 0;
@@ -1394,8 +1596,8 @@ PHP;
             }
         }
 
-        if (!$this->ui->isVerbose() && $createdCount > 0) {
-            $this->ui->success("Root symlinks created");
+        if ($createdCount > 0) {
+            $this->ui->verbose("Root symlinks created", 'success');
         }
     }
 
@@ -1423,7 +1625,7 @@ PHP;
         $postHooks = $this->runner->getPostHooks();
 
         $this->ui->info("\nDeployment Tasks in Run Order:");
-        $runOrder = ['backup', 'update', 'composer', 'nodejs', 'symlink', 'perms'];
+        $runOrder = ['backup', 'update', 'composer', 'nodejs', 'steps', 'symlink', 'perms'];
         if (!empty($this->adapterRunOrderRules)) {
             $runOrder = $this->runner->mergeRunOrder($runOrder, $this->adapterRunOrderRules);
         }
@@ -1723,7 +1925,7 @@ PHP;
 
     private function listTasks(): void
     {
-        $runOrder = ['backup', 'update', 'composer', 'nodejs', 'symlink', 'perms'];
+        $runOrder = ['backup', 'update', 'composer', 'nodejs', 'steps', 'symlink', 'perms'];
         if (!empty($this->adapterRunOrderRules)) {
             $runOrder = $this->runner->mergeRunOrder($runOrder, $this->adapterRunOrderRules);
         }
@@ -1830,6 +2032,8 @@ PHP;
         $this->ui->info("  status           Show project configuration and task order");
         $this->ui->info("  backups          List available backups");
         $this->ui->info("  list             List all tasks and hooks in run order");
+        $this->ui->info("  once:list        List all recorded one-time deployment steps");
+        $this->ui->info("  once:reset [id]  Reset one-time step record (use --all for all)");
         $this->ui->info("  config           View or update configuration keys");
         $this->ui->info("  version          Show current ShipIt version\n");
         $this->ui->info("Options:");
@@ -2059,7 +2263,9 @@ PHP;
                 }
             }
 
-            if (is_dir($releasePath) || is_link($releasePath)) {
+            if (is_link($releasePath)) {
+                @unlink($releasePath);
+            } elseif (is_dir($releasePath)) {
                 $this->fs->removeFolder($releasePath);
             }
 
@@ -2069,8 +2275,11 @@ PHP;
 
     private function performSymlinkSwap(): void
     {
+        $this->ui->step("Swapping live release symlink...");
         if ($this->dryRun) {
-            $this->ui->info("[Dry Run] Would point symlink $this->currentSymlink to $this->activeDir");
+            if ($this->ui->isVerbose()) {
+                $this->ui->info("[Dry Run] Would point symlink $this->currentSymlink to $this->activeDir");
+            }
             return;
         }
 
@@ -2087,7 +2296,7 @@ PHP;
             throw new \RuntimeException("Atomic symlink swap failed.");
         }
 
-        $this->ui->success("🔄 Atomic symlink swap successful. Live site pointed to: " . basename($this->activeDir));
+        $this->ui->verbose("🔄 Atomic symlink swap successful. Live site pointed to: " . basename($this->activeDir), 'success');
     }
 
     private function pruneReleases(): void
@@ -2105,6 +2314,7 @@ PHP;
         sort($releases);
 
         if (count($releases) > $keep) {
+            $this->ui->step("Pruning old releases...");
             $toDelete = array_slice($releases, 0, count($releases) - $keep);
             foreach ($toDelete as $folder) {
                 $this->ui->verbose("🗑️ Pruning old release: " . basename($folder));
@@ -2227,5 +2437,249 @@ PHP;
         if (isset($this->fs)) {
             $this->fs = new Filesystem($this->ui, $this->dryRun);
         }
+    }
+
+    private function normalizeSteps(array $rawSteps): array
+    {
+        $normalized = [];
+        foreach ($rawSteps as $step) {
+            if (is_string($step)) {
+                $cmd = trim($step);
+                if ($cmd === '') {
+                    continue;
+                }
+                $normalized[] = [
+                    'id' => md5($cmd),
+                    'name' => $cmd,
+                    'run' => $cmd,
+                    'once' => false,
+                    'ignore_error' => false,
+                    'stage' => 'deploy',
+                ];
+            } elseif (is_array($step)) {
+                $cmd = $step['run'] ?? $step['command'] ?? $step['cmd'] ?? '';
+                if (empty($cmd)) {
+                    continue;
+                }
+                $name = $step['name'] ?? $step['label'] ?? $step['step'] ?? $cmd;
+                $once = !empty($step['once']);
+                $id = !empty($step['id']) ? (string)$step['id'] : md5($name . ':' . $cmd);
+                $ignoreError = !empty($step['ignore_error']) || !empty($step['ignoreError']);
+                $stage = $step['stage'] ?? ($step['when'] ?? 'deploy');
+
+                $normalized[] = [
+                    'id' => $id,
+                    'name' => $name,
+                    'run' => $cmd,
+                    'once' => $once,
+                    'ignore_error' => $ignoreError,
+                    'stage' => $stage,
+                ];
+            }
+        }
+        return $normalized;
+    }
+
+    public function getCustomSteps(string $stage = 'deploy'): array
+    {
+        $raw = array_merge(
+            (array)($this->config['steps'] ?? []),
+            (array)($this->config['commands'] ?? [])
+        );
+
+        $normalized = $this->normalizeSteps($raw);
+        return array_values(array_filter($normalized, fn($s) => $s['stage'] === $stage));
+    }
+
+    private function runCustomSteps(): void
+    {
+        $steps = $this->getCustomSteps('deploy');
+        if (empty($steps)) {
+            return;
+        }
+
+        foreach ($steps as $step) {
+            $this->executeStep($step);
+        }
+    }
+
+    private function executeStep(array $step): void
+    {
+        $id = $step['id'];
+        $name = $step['name'];
+        $cmd = $step['run'];
+        $isOnce = $step['once'];
+        $ignoreError = $step['ignore_error'];
+
+        if ($isOnce && $this->isOnceExecuted($id)) {
+            $record = $this->getOnceRecord($id);
+            $date = $record['executed_at'] ?? 'previously';
+            $this->ui->verbose("⏭️  Skipping one-time step: $name (already executed on $date)");
+            return;
+        }
+
+        $this->runCommand($name, $cmd, $ignoreError);
+
+        if ($isOnce && !$this->dryRun && ($this->lastExitCode === 0 || $ignoreError)) {
+            $this->recordOnceExecuted($id, $name, $cmd);
+            $this->ui->verbose("Recorded one-time step '$name'", 'success');
+        }
+    }
+
+    private function runPreDeployHook(): void
+    {
+        $hooks = $this->config['hooks'] ?? [];
+        if (!empty($hooks['pre-deploy'])) {
+            $this->runCommand('Pre-deploy Hook', $hooks['pre-deploy'], true);
+        }
+        foreach ($this->getCustomSteps('pre-deploy') as $step) {
+            $this->executeStep($step);
+        }
+    }
+
+    private function runPostDeployHook(): void
+    {
+        $hooks = $this->config['hooks'] ?? [];
+        if (!empty($hooks['post-deploy'])) {
+            $this->runCommand('Post-deploy Hook', $hooks['post-deploy'], true);
+        }
+        foreach ($this->getCustomSteps('post-deploy') as $step) {
+            $this->executeStep($step);
+        }
+    }
+
+    public function getStateFile(): string
+    {
+        return $this->stateFile ?: ($this->deployDir . '/state.json');
+    }
+
+    public function loadState(): array
+    {
+        $file = $this->getStateFile();
+        if (file_exists($file)) {
+            $data = json_decode(file_get_contents($file) ?: '', true);
+            return is_array($data) ? $data : [];
+        }
+        return [];
+    }
+
+    public function saveState(array $state): void
+    {
+        if (!is_dir($this->deployDir)) {
+            @mkdir($this->deployDir, 0777, true);
+        }
+        $file = $this->getStateFile();
+        file_put_contents($file, json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    }
+
+    public function isOnceExecuted(string $stepId): bool
+    {
+        $state = $this->loadState();
+        return isset($state['executed_once'][$stepId]);
+    }
+
+    public function getOnceRecord(string $stepId): ?array
+    {
+        $state = $this->loadState();
+        return $state['executed_once'][$stepId] ?? null;
+    }
+
+    public function recordOnceExecuted(string $stepId, string $name, string $command): void
+    {
+        $state = $this->loadState();
+        if (!isset($state['executed_once'])) {
+            $state['executed_once'] = [];
+        }
+        $state['executed_once'][$stepId] = [
+            'id' => $stepId,
+            'name' => $name,
+            'command' => $command,
+            'executed_at' => date('Y-m-d H:i:s'),
+            'release' => basename($this->activeDir),
+        ];
+        $this->saveState($state);
+    }
+
+    public function resetOnceExecuted(?string $stepId = null): void
+    {
+        $state = $this->loadState();
+        if ($stepId === null || $stepId === '--all') {
+            $state['executed_once'] = [];
+        } else {
+            unset($state['executed_once'][$stepId]);
+        }
+        $this->saveState($state);
+    }
+
+    private function doOnceList(): void
+    {
+        $state = $this->loadState();
+        $executed = $state['executed_once'] ?? [];
+
+        if (empty($executed)) {
+            $this->ui->info("No one-time commands have been recorded as executed yet.");
+            return;
+        }
+
+        $this->ui->info("Recorded One-Time Commands for: " . $this->rootDir);
+        $rows = [];
+        foreach ($executed as $id => $record) {
+            $rows[] = [
+                $id,
+                $record['name'] ?? '-',
+                $record['command'] ?? '-',
+                $record['executed_at'] ?? '-',
+                $record['release'] ?? '-',
+            ];
+        }
+
+        $this->ui->table(['ID', 'Name', 'Command', 'Executed At', 'Release'], $rows);
+    }
+
+    private function doOnceReset(array $argv): void
+    {
+        $target = null;
+        foreach (array_slice($argv, 1) as $arg) {
+            if ($arg !== 'once:reset' && !str_starts_with($arg, '--log-id=')) {
+                $target = $arg;
+                break;
+            }
+        }
+
+        if (!$target) {
+            $this->ui->error("Please specify a step ID to reset, or use --all to reset all records.\nUsage: shipit once:reset <id|--all>");
+            return;
+        }
+
+        if ($target === '--all') {
+            $this->resetOnceExecuted();
+            $this->ui->success("All one-time command records have been reset.");
+            return;
+        }
+
+        if (!$this->isOnceExecuted($target)) {
+            $state = $this->loadState();
+            $matched = null;
+            foreach ($state['executed_once'] ?? [] as $id => $record) {
+                if ($record['name'] === $target || str_starts_with($id, $target)) {
+                    $matched = $id;
+                    break;
+                }
+            }
+            if ($matched) {
+                $target = $matched;
+            } else {
+                $this->ui->error("One-time command record '$target' not found.");
+                return;
+            }
+        }
+
+        $this->resetOnceExecuted($target);
+        $this->ui->success("Reset one-time command '$target'. It will run again on the next deployment.");
+    }
+
+    public function getLastExitCode(): int
+    {
+        return $this->lastExitCode;
     }
 }

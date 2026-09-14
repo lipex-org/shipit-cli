@@ -4,7 +4,8 @@
     "type": "library",
     "license": "MIT",
     "require": {
-        "php": ">=8.5"
+        "php": ">=8.5",
+        "symfony/yaml": "^8.1"
     },
     "autoload": {
         "psr-4": {
