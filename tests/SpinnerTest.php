@@ -121,7 +121,7 @@ class SpinnerTest extends TestCase
         $output = ob_get_clean();
 
         $this->assertFalse($spinner->isActive());
-        $this->assertStringContainsString("✅ All done", $output);
+        $this->assertStringContainsString("All done", $output);
     }
 
     public function testTerminalUIStepInVerboseMode(): void
@@ -136,7 +136,7 @@ class SpinnerTest extends TestCase
 
         // When verbose, it should not activate spinner, but output an info line directly
         $this->assertFalse($spinner->isActive());
-        $this->assertStringContainsString("⚙️  Verbose step", $output);
+        $this->assertStringContainsString("Verbose step", $output);
     }
 
     public function testTerminalUISuccessStopsActiveSpinner(): void
@@ -168,6 +168,6 @@ class SpinnerTest extends TestCase
         $output = ob_get_clean();
 
         $this->assertFalse($spinner->isActive());
-        $this->assertStringContainsString("❌ Failed!", $output);
+        $this->assertStringContainsString("Failed!", $output);
     }
 }

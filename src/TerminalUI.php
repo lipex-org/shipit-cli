@@ -27,7 +27,7 @@ class TerminalUI
     public function step(string $msg): void
     {
         if ($this->verbose) {
-            $this->info("⚙️  " . $msg);
+            $this->info($msg);
             return;
         }
 
@@ -74,7 +74,7 @@ class TerminalUI
         if (isset($this->spinner) && $this->spinner->isActive()) {
             $this->spinner->stop();
         }
-        echo $this->color("✅ " . $msg . "\n", "\033[32m");
+        echo $this->color($msg . "\n", "\033[32m");
     }
 
     public function error(string $msg): void
@@ -82,29 +82,29 @@ class TerminalUI
         if (isset($this->spinner) && $this->spinner->isActive()) {
             $this->spinner->stop();
         }
-        echo $this->color("❌ " . $msg . "\n", "\033[31m");
+        echo $this->color($msg . "\n", "\033[31m");
     }
 
     public function info(string $msg): void
     {
         if (isset($this->spinner) && $this->spinner->isActive()) {
             $this->spinner->clear();
-            echo $this->color("ℹ️  " . $msg . "\n", "\033[36m");
+            echo $this->color($msg . "\n", "\033[36m");
             $this->spinner->render();
             return;
         }
-        echo $this->color("ℹ️  " . $msg . "\n", "\033[36m");
+        echo $this->color($msg . "\n", "\033[36m");
     }
 
     public function warning(string $msg): void
     {
         if (isset($this->spinner) && $this->spinner->isActive()) {
             $this->spinner->clear();
-            echo $this->color("⚠️  " . $msg . "\n", "\033[33m");
+            echo $this->color($msg . "\n", "\033[33m");
             $this->spinner->render();
             return;
         }
-        echo $this->color("⚠️  " . $msg . "\n", "\033[33m");
+        echo $this->color($msg . "\n", "\033[33m");
     }
 
     public function verbose(string $msg, string $level = 'info'): void

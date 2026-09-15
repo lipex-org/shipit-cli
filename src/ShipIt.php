@@ -262,7 +262,7 @@ class ShipIt
 
                 $this->doDeploy();
             } catch (\Throwable $e) {
-                $this->ui->error("\n❌ " . $e->getMessage());
+                $this->ui->error("\n" . $e->getMessage());
                 $this->updateGlobalRegistry('failed');
                 exit(1);
             }
@@ -362,10 +362,10 @@ class ShipIt
                 $this->updateGlobalRegistry('success');
             }
 
-            $this->sendNotification("🚀 Deployment successful for project " . basename($this->rootDir) . " on branch " . ($this->config['branch'] ?? 'main'));
+            $this->sendNotification("Deployment successful for project " . basename($this->rootDir) . " on branch " . ($this->config['branch'] ?? 'main'));
             $this->ui->success("Deployment completed successfully.");
         } catch (\Throwable $e) {
-            $this->sendNotification("❌ Deployment failed for project " . basename($this->rootDir) . ": " . $e->getMessage());
+            $this->sendNotification("Deployment failed for project " . basename($this->rootDir) . ": " . $e->getMessage());
             $this->updateGlobalRegistry('failed');
             throw $e;
         }
@@ -373,21 +373,33 @@ class ShipIt
 
     public function runCommand(string $label, string $cmd, bool $ignoreError = false): void
     {
+        $cwd = (!empty($this->activeDir) && is_dir($this->activeDir)) ? $this->activeDir : null;
+        $this->runProcess($label, $cmd, $cwd, $ignoreError);
+    }
+
+    public function runProcess(
+        string $label,
+        string $cmd,
+        ?string $cwd = null,
+        bool $ignoreError = false,
+        ?string $stepLabel = null
+    ): string {
         if ($this->dryRun) {
             $this->lastExitCode = 0;
             if ($this->ui->isVerbose()) {
                 $this->ui->info("[Dry Run] Would run: $label ($cmd)");
             } else {
-                $this->ui->step("[Dry Run] Would run: $label");
+                $this->ui->step($stepLabel ?? "[Dry Run] Would run: $label");
             }
-            return;
+            return '';
         }
 
-        $escaped = escapeshellarg($this->activeDir);
-        $fullCmd = "cd $escaped && $cmd 2>&1";
+        $fullCmd = (!empty($cwd) && is_dir($cwd))
+            ? "cd " . escapeshellarg($cwd) . " && $cmd 2>&1"
+            : "$cmd 2>&1";
 
         if ($this->ui->isVerbose()) {
-            $this->ui->info("⚙️  Running $label ($cmd)...");
+            $this->ui->info("Running $label ($cmd)...");
             $output = shell_exec($fullCmd);
             if ($output !== null && trim((string)$output) !== '') {
                 echo trim((string)$output) . "\n";
@@ -399,10 +411,11 @@ class ShipIt
                 $this->lastExitCode = 0;
                 $this->ui->success("$label done");
             }
-            return;
+            return (string)($output ?? '');
         }
 
-        $this->ui->step("Running $label...");
+        $display = $stepLabel ?? "Running $label...";
+        $this->ui->step($display);
 
         if (!function_exists('proc_open')) {
             $output = shell_exec($fullCmd);
@@ -410,7 +423,7 @@ class ShipIt
             if ($output === null && !$ignoreError) {
                 $this->ui->error("$label failed");
             }
-            return;
+            return (string)($output ?? '');
         }
 
         $descriptors = [
@@ -426,7 +439,7 @@ class ShipIt
             if ($output === null && !$ignoreError) {
                 $this->ui->error("$label failed");
             }
-            return;
+            return (string)($output ?? '');
         }
 
         fclose($pipes[0]);
@@ -470,6 +483,8 @@ class ShipIt
         if ($exitCode !== 0 && !$ignoreError) {
             $this->ui->error("$label failed:\n" . trim($output));
         }
+
+        return $output;
     }
 
     private function parseArgs(array $argv): void
@@ -636,7 +651,7 @@ class ShipIt
         if ($backupRoot && !is_dir($backupRoot) && !$this->dryRun) {
             $this->ui->verbose("Attempting to create backup directory: $backupRoot");
             if (!@mkdir($backupRoot, 0777, true) && !is_dir($backupRoot)) {
-                $this->ui->warning("⚠️  Could not create backup directory at $backupRoot. You may need to create it manually or check permissions.");
+                $this->ui->warning("Could not create backup directory at $backupRoot. You may need to create it manually or check permissions.");
             } else {
                 $this->ui->verbose("Created backup directory: $backupRoot", 'success');
             }
@@ -730,24 +745,29 @@ PHP;
         }
 
         // Perform the pre-clone
-        $this->ui->step("Pre-cloning repository ($branch)...");
+        $stepLabel = "Pre-cloning repository ($branch)...";
+        $quietFlag = $this->ui->isVerbose() ? '' : '--quiet ';
+        $baseCloneCmd = "GIT_TERMINAL_PROMPT=0 git clone " . $quietFlag . "-b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl);
+
         if (($this->config['strategy'] ?? 'copy') === 'symlink') {
             if (!is_dir($this->activeDir)) {
                 @mkdir($this->activeDir, 0777, true);
             }
-            $this->ui->verbose("📥 Pre-cloning $gitRepoUrl (branch: $branch) to release folder");
-            exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($this->activeDir), $out, $status);
-            if ($status !== 0) {
-                throw new \RuntimeException("Pre-clone failed.");
+            $this->ui->verbose("Pre-cloning $gitRepoUrl (branch: $branch) to release folder");
+            $cmd = $baseCloneCmd . " " . escapeshellarg($this->activeDir);
+            $output = $this->runProcess("Pre-clone repository", $cmd, null, false, $stepLabel);
+            if ($this->lastExitCode !== 0) {
+                throw new \RuntimeException("Pre-clone failed: " . trim($output));
             }
         } else {
             if (is_dir($cloneTarget)) {
                 $this->fs->removeFolder($cloneTarget);
             }
-            $this->ui->verbose("📥 Pre-cloning $gitRepoUrl (branch: $branch)");
-            exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($cloneTarget), $out, $status);
-            if ($status !== 0) {
-                throw new \RuntimeException("Pre-clone failed.");
+            $this->ui->verbose("Pre-cloning $gitRepoUrl (branch: $branch)");
+            $cmd = $baseCloneCmd . " " . escapeshellarg($cloneTarget);
+            $output = $this->runProcess("Pre-clone repository", $cmd, null, false, $stepLabel);
+            if ($this->lastExitCode !== 0) {
+                throw new \RuntimeException("Pre-clone failed: " . trim($output));
             }
         }
 
@@ -905,9 +925,9 @@ PHP;
         $this->runner->addTask('perms', fn() => $this->fixPermissions());
         $this->runner->addTask('symlink', fn() => $this->createSymlinks());
 
-        $this->runner->addPreHook('update', fn() => $this->ui->verbose("🔒 Entering maintenance mode..."));
-        $this->runner->addPostHook('update', fn() => $this->ui->verbose("🔓 Leaving maintenance mode..."));
-        $this->runner->addPostHook('composer', fn() => $this->ui->verbose("🚀 Composer done, autoloader optimized.", 'success'));
+        $this->runner->addPreHook('update', fn() => $this->ui->verbose("Entering maintenance mode..."));
+        $this->runner->addPostHook('update', fn() => $this->ui->verbose("Leaving maintenance mode..."));
+        $this->runner->addPostHook('composer', fn() => $this->ui->verbose("Composer done, autoloader optimized.", 'success'));
     }
 
     private function applyConfigHooks(): void
@@ -1140,7 +1160,7 @@ PHP;
     {
         $this->ui->step("Creating backup...");
         if ($this->isFirstRun()) {
-            $this->ui->verbose("⏩ Skipping backup: project directory appears to be empty or contains only deployment files.");
+            $this->ui->verbose("Skipping backup: project directory appears to be empty or contains only deployment files.");
             return;
         }
 
@@ -1151,19 +1171,19 @@ PHP;
         if (!$this->dryRun && !is_dir($backupRoot)) {
             $this->ui->verbose("Creating backup directory: $backupRoot");
             if (!@mkdir($backupRoot, 0777, true) && !is_dir($backupRoot)) {
-                $this->ui->error("❌ Failed to create backup directory: $backupRoot. Please check permissions.");
+                $this->ui->error("Failed to create backup directory: $backupRoot. Please check permissions.");
                 return;
             }
         }
 
         if (!$this->dryRun && !is_dir($backupFolder)) {
             if (!@mkdir($backupFolder, 0777, true) && !is_dir($backupFolder)) {
-                $this->ui->error("❌ Failed to create specific backup folder: $backupFolder. Please check permissions.");
+                $this->ui->error("Failed to create specific backup folder: $backupFolder. Please check permissions.");
                 return;
             }
         }
 
-        $this->ui->verbose("📁 Backup started to $backupRoot ...");
+        $this->ui->verbose("Backup started to $backupRoot ...");
         $ignoreList = $this->backupIgnoreList;
         if (($this->config['strategy'] ?? 'copy') === 'symlink') {
             $ignoreList = array_unique(array_merge($ignoreList, ['releases', 'shared', 'current']));
@@ -1198,15 +1218,19 @@ PHP;
             throw new \RuntimeException("No gitRepoUrl set in config.json or via arguments.");
         }
 
+        $quietFlag = $this->ui->isVerbose() ? '' : '--quiet ';
+        $baseCloneCmd = "GIT_TERMINAL_PROMPT=0 git clone " . $quietFlag . "-b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl);
+
         if (($this->config['strategy'] ?? 'copy') === 'symlink') {
-            $this->ui->verbose("📥 Cloning $gitRepoUrl (branch: $branch) to release folder");
+            $this->ui->verbose("Cloning $gitRepoUrl (branch: $branch) to release folder");
             if (!$this->dryRun && !$this->preCloned) {
                 if (!is_dir($this->activeDir)) {
                     mkdir($this->activeDir, 0777, true);
                 }
-                exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($this->activeDir), $out, $status);
-                if ($status !== 0) {
-                    throw new \RuntimeException("Git clone failed.");
+                $cmd = $baseCloneCmd . " " . escapeshellarg($this->activeDir);
+                $output = $this->runProcess("Clone repository", $cmd, null, false, "Cloning repository ($branch)...");
+                if ($this->lastExitCode !== 0) {
+                    throw new \RuntimeException("Git clone failed: " . trim($output));
                 }
             }
             $this->ui->verbose("Release clone completed", 'success');
@@ -1217,18 +1241,19 @@ PHP;
                 $this->fs->removeFolder($cloneFolder);
             }
 
-            $this->ui->verbose("📥 Cloning $gitRepoUrl (branch: $branch)");
+            $this->ui->verbose("Cloning $gitRepoUrl (branch: $branch)");
             if (!$this->dryRun && !$this->preCloned) {
-                exec("git clone -b " . escapeshellarg($branch) . " " . escapeshellarg($gitRepoUrl) . " " . escapeshellarg($cloneFolder), $out, $status);
-                if ($status !== 0) {
-                    throw new \RuntimeException("Git clone failed.");
+                $cmd = $baseCloneCmd . " " . escapeshellarg($cloneFolder);
+                $output = $this->runProcess("Clone repository", $cmd, null, false, "Cloning repository ($branch)...");
+                if ($this->lastExitCode !== 0) {
+                    throw new \RuntimeException("Git clone failed: " . trim($output));
                 }
             }
 
-            $this->ui->verbose("🔄 Updating project...");
+            $this->ui->verbose("Updating project...");
             $isFirstRun = $this->isFirstRun();
             if ($isFirstRun) {
-                $this->ui->verbose("✨ First run detected: copying all files from repository.");
+                $this->ui->verbose("First run detected: copying all files from repository.");
             }
 
             $this->fs->copyFolder($cloneFolder, $this->rootDir, $this->updateIgnoreList, '', $this->log, $isFirstRun);
@@ -1292,7 +1317,7 @@ PHP;
                 return;
             }
 
-            $this->ui->verbose("⏪ Rolling back symlink to $target ...");
+            $this->ui->verbose("Rolling back symlink to $target ...");
             if (!$this->dryRun) {
                 $tempLink = $this->rootDir . '/current_temp';
                 if (file_exists($tempLink) || is_link($tempLink)) {
@@ -1305,7 +1330,7 @@ PHP;
             }
             $this->ui->success("Rollback completed successfully. pointed to: " . basename($target));
             $this->updateGlobalRegistry('success');
-            $this->sendNotification("⏪ Rollback executed successfully for project " . basename($this->rootDir) . ". pointed to: " . basename($target));
+            $this->sendNotification("Rollback executed successfully for project " . basename($this->rootDir) . ". pointed to: " . basename($target));
             $this->runRollbackHook('post-rollback');
             return;
         }
@@ -1350,11 +1375,11 @@ PHP;
             return;
         }
 
-        $this->ui->verbose("⏪ Rolling back to $target ...");
+        $this->ui->verbose("Rolling back to $target ...");
         $this->fs->copyFolder($target, $this->rootDir, [], '', $this->log, true);
         $this->ui->success("Rollback completed successfully.");
         $this->updateGlobalRegistry('success');
-        $this->sendNotification("⏪ Rollback executed successfully for project " . basename($this->rootDir) . ". restored from backup: " . basename($target));
+        $this->sendNotification("Rollback executed successfully for project " . basename($this->rootDir) . ". restored from backup: " . basename($target));
         $this->runRollbackHook('post-rollback');
     }
 
@@ -1396,7 +1421,7 @@ PHP;
         $toDeleteCount = count($backups) - $retention;
 
         for ($i = 0; $i < $toDeleteCount; $i++) {
-            $this->ui->verbose("🗑️ Rotating old backup: " . basename($backups[$i]));
+            $this->ui->verbose("Rotating old backup: " . basename($backups[$i]));
             $this->fs->removeFolder($backups[$i]);
         }
     }
@@ -1404,7 +1429,7 @@ PHP;
     private function fixPermissions(): void
     {
         if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-            $this->ui->verbose("⏩ Skipping file permissions adjustments on Windows environment.");
+            $this->ui->verbose("Skipping file permissions adjustments on Windows environment.");
             return;
         }
         $this->ui->step("Configuring permissions & ownership...");
@@ -1539,7 +1564,7 @@ PHP;
         }
 
         $this->ui->step("Configuring root symlinks...");
-        $this->ui->verbose("🔗 Creating root directory entrypoint symlinks...");
+        $this->ui->verbose("Creating root directory entrypoint symlinks...");
 
         $createdCount = 0;
         foreach ($rootSymlinks as $pair) {
@@ -2000,7 +2025,7 @@ PHP;
 
             if (!empty($prunedPaths)) {
                 foreach ($prunedPaths as $p) {
-                    $this->ui->verbose("🗑️  Pruning non-existent project: $p", 'warning');
+                    $this->ui->verbose("Pruning non-existent project: $p", 'warning');
                 }
                 ftruncate($fp, 0);
                 rewind($fp);
@@ -2296,7 +2321,7 @@ PHP;
             throw new \RuntimeException("Atomic symlink swap failed.");
         }
 
-        $this->ui->verbose("🔄 Atomic symlink swap successful. Live site pointed to: " . basename($this->activeDir), 'success');
+        $this->ui->verbose("Atomic symlink swap successful. Live site pointed to: " . basename($this->activeDir), 'success');
     }
 
     private function pruneReleases(): void
@@ -2317,7 +2342,7 @@ PHP;
             $this->ui->step("Pruning old releases...");
             $toDelete = array_slice($releases, 0, count($releases) - $keep);
             foreach ($toDelete as $folder) {
-                $this->ui->verbose("🗑️ Pruning old release: " . basename($folder));
+                $this->ui->verbose("Pruning old release: " . basename($folder));
                 $this->fs->removeFolder($folder);
             }
         }
@@ -2514,7 +2539,7 @@ PHP;
         if ($isOnce && $this->isOnceExecuted($id)) {
             $record = $this->getOnceRecord($id);
             $date = $record['executed_at'] ?? 'previously';
-            $this->ui->verbose("⏭️  Skipping one-time step: $name (already executed on $date)");
+            $this->ui->verbose("Skipping one-time step: $name (already executed on $date)");
             return;
         }
 

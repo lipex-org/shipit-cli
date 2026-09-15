@@ -102,10 +102,10 @@ class VerbosityTest extends TestCase
         $ui->verbose("Info detail", 'info');
         $output = ob_get_clean();
 
-        $this->assertStringContainsString("✅ Success detail", $output);
-        $this->assertStringContainsString("⚠️  Warning detail", $output);
-        $this->assertStringContainsString("❌ Error detail", $output);
-        $this->assertStringContainsString("ℹ️  Info detail", $output);
+        $this->assertStringContainsString("Success detail", $output);
+        $this->assertStringContainsString("Warning detail", $output);
+        $this->assertStringContainsString("Error detail", $output);
+        $this->assertStringContainsString("Info detail", $output);
     }
 
     public function testTaskRunnerSkipsSilentWhenNotVerbose(): void
