@@ -256,4 +256,129 @@ class VerbosityTest extends TestCase
         // The logo contains the ascii art text
         $this->assertNotEmpty($logoOutput);
     }
+
+    public function testTerminalUISummaryOutput(): void
+    {
+        $ui = new TerminalUI();
+        ob_start();
+        $ui->summary('Test Title', [
+            'Mode' => 'Non-verbose (use --verbose or -v for detailed output)',
+            'Framework' => 'CodeIgniter 4',
+            'Package Manager' => 'Composer',
+        ]);
+        $output = ob_get_clean();
+
+        $this->assertStringContainsString('Test Title', $output);
+        $this->assertStringContainsString('Mode:', $output);
+        $this->assertStringContainsString('Non-verbose', $output);
+        $this->assertStringContainsString('Framework:', $output);
+        $this->assertStringContainsString('CodeIgniter 4', $output);
+        $this->assertStringContainsString('Package Manager:', $output);
+        $this->assertStringContainsString('Composer', $output);
+    }
+
+    public function testDetectedFrameworkFromConfig(): void
+    {
+        $shipIt = new ShipIt($this->tempDir);
+        $reflector = new \ReflectionClass(ShipIt::class);
+        $configProp = $reflector->getProperty('config');
+
+        $configProp->setValue($shipIt, ['adapter' => 'ci4']);
+        $this->assertSame('CodeIgniter 4', $shipIt->getDetectedFramework());
+
+        $configProp->setValue($shipIt, ['adapter' => 'laravel']);
+        $this->assertSame('Laravel', $shipIt->getDetectedFramework());
+
+        $configProp->setValue($shipIt, ['adapter' => 'vite']);
+        $this->assertSame('Vite', $shipIt->getDetectedFramework());
+
+        $configProp->setValue($shipIt, ['adapter' => 'wordpress']);
+        $this->assertSame('WordPress', $shipIt->getDetectedFramework());
+    }
+
+    public function testDetectedFrameworkFromMarkerFiles(): void
+    {
+        $projectDir = $this->tempDir . '/ci4_app';
+        mkdir($projectDir, 0777, true);
+        touch($projectDir . '/spark');
+
+        $shipIt = new ShipIt($projectDir);
+        $this->assertSame('CodeIgniter 4', $shipIt->getDetectedFramework());
+
+        unlink($projectDir . '/spark');
+        touch($projectDir . '/artisan');
+        $this->assertSame('Laravel', $shipIt->getDetectedFramework());
+
+        unlink($projectDir . '/artisan');
+        touch($projectDir . '/next.config.js');
+        $this->assertSame('Next.js', $shipIt->getDetectedFramework());
+
+        unlink($projectDir . '/next.config.js');
+        $this->assertSame('Generic / Custom', $shipIt->getDetectedFramework());
+    }
+
+    public function testDetectedPackageManagers(): void
+    {
+        $projectDir = $this->tempDir . '/pm_app';
+        mkdir($projectDir, 0777, true);
+        file_put_contents($projectDir . '/composer.json', '{}');
+        file_put_contents($projectDir . '/package.json', '{}');
+        file_put_contents($projectDir . '/yarn.lock', '');
+
+        $shipIt = new ShipIt($projectDir);
+        $pms = $shipIt->getDetectedPackageManagers();
+
+        $this->assertContains('Composer', $pms);
+        $this->assertContains('yarn', $pms);
+    }
+
+    public function testDetectedPackageManagersIgnored(): void
+    {
+        $projectDir = $this->tempDir . '/pm_ignored_app';
+        mkdir($projectDir, 0777, true);
+        file_put_contents($projectDir . '/composer.json', '{}');
+        file_put_contents($projectDir . '/package.json', '{}');
+
+        $shipIt = new ShipIt($projectDir);
+        $reflector = new \ReflectionClass(ShipIt::class);
+        $ignoreProp = $reflector->getProperty('ignoreList');
+        $ignoreProp->setValue($shipIt, ['composer', 'nodejs']);
+
+        $pms = $shipIt->getDetectedPackageManagers();
+        $this->assertContains('Composer (ignored)', $pms);
+        $this->assertContains('npm (ignored)', $pms);
+    }
+
+    public function testShowDeploymentSummaryOutputsTechnologyAndNonVerboseMode(): void
+    {
+        $projectDir = $this->tempDir . '/summary_app';
+        mkdir($projectDir, 0777, true);
+        file_put_contents($projectDir . '/composer.json', '{}');
+
+        $shipIt = new ShipIt($projectDir);
+        $reflector = new \ReflectionClass(ShipIt::class);
+        $configProp = $reflector->getProperty('config');
+        $configProp->setValue($shipIt, [
+            'name' => 'test-deploy-app',
+            'adapter' => 'ci4',
+            'branch' => 'staging',
+            'strategy' => 'copy',
+        ]);
+
+        ob_start();
+        $shipIt->showDeploymentSummary();
+        $output = ob_get_clean();
+
+        $this->assertStringContainsString('ShipIt Deploying: test-deploy-app (branch: staging)', $output);
+        $this->assertStringContainsString('Mode:', $output);
+        $this->assertStringContainsString('Non-verbose', $output);
+        $this->assertStringContainsString('Framework:', $output);
+        $this->assertStringContainsString('CodeIgniter 4', $output);
+        $this->assertStringContainsString('Package Manager:', $output);
+        $this->assertStringContainsString('Composer', $output);
+        $this->assertStringContainsString('Environment:', $output);
+        $this->assertStringContainsString('PHP', $output);
+        $this->assertStringContainsString('Strategy:', $output);
+        $this->assertStringContainsString('copy', $output);
+    }
 }

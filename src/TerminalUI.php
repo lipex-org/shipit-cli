@@ -135,6 +135,19 @@ class TerminalUI
         }
     }
 
+    public function summary(string $title, array $details): void
+    {
+        if (isset($this->spinner) && $this->spinner->isActive()) {
+            $this->spinner->clear();
+        }
+        echo "\n" . $this->color($title, "\033[1;36m") . "\n";
+        foreach ($details as $label => $val) {
+            $paddedLabel = str_pad($label . ':', 18, ' ', STR_PAD_RIGHT);
+            echo "  " . $this->color($paddedLabel, "\033[1m") . " " . $val . "\n";
+        }
+        echo "\n";
+    }
+
     public function table(array $headers, array $rows): void
     {
         if (isset($this->spinner) && $this->spinner->isActive()) {

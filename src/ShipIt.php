@@ -340,6 +340,11 @@ class ShipIt
             $this->activeDir = $this->rootDir;
         }
 
+        if (!$this->verbose) {
+            $this->ui->getSpinner()->clear();
+            $this->showDeploymentSummary();
+        }
+
         if ($this->dryRun) {
             $this->ui->info("DRY RUN MODE ENABLED. No files will be modified.");
         }
@@ -1631,12 +1636,15 @@ PHP;
         $this->ui->info("ShipIt Project Status");
         $this->ui->info("Root: " . $this->rootDir);
 
+        $pms = $this->getDetectedPackageManagers();
         $this->ui->table(
             ["Config Key", "Value"],
             [
-                ["Repository", $this->config['gitRepoUrl']],
-                ["Branch", $this->config['branch']],
-                ["Adapter", $this->config['adapter'] ?? 'none'],
+                ["Repository", $this->config['gitRepoUrl'] ?? 'none'],
+                ["Branch", $this->config['branch'] ?? 'main'],
+                ["Strategy", $this->config['strategy'] ?? 'copy'],
+                ["Framework", $this->getDetectedFramework()],
+                ["Package Manager", !empty($pms) ? implode(', ', $pms) : 'None detected'],
                 ["Last Shipped", $this->config['last_shipped_at'] ?? 'Never'],
             ]
         );
@@ -2234,6 +2242,144 @@ PHP;
     private function showVersion(): void
     {
         $this->ui->info("ShipIt version " . self::VERSION);
+    }
+
+    public function getDetectedFramework(): string
+    {
+        // 1. Configured adapter in config
+        $adapter = $this->config['adapter'] ?? null;
+        if (!empty($adapter)) {
+            return match (strtolower((string) $adapter)) {
+                'ci4' => 'CodeIgniter 4',
+                'laravel' => 'Laravel',
+                'vite' => 'Vite',
+                'react' => 'React (Vite)',
+                'wordpress' => 'WordPress',
+                'vue' => 'Vue',
+                'symfony' => 'Symfony',
+                default => ucfirst((string) $adapter),
+            };
+        }
+
+        // 2. Marker file detection across candidate directories
+        $candidateDirs = array_unique(array_filter([
+            $this->activeDir ?? null,
+            $this->rootDir . '/__temp_update_clone',
+            $this->rootDir,
+        ], fn($d) => !empty($d) && is_dir($d)));
+
+        foreach ($candidateDirs as $dir) {
+            if (file_exists($dir . '/spark')) {
+                return 'CodeIgniter 4';
+            }
+            if (file_exists($dir . '/artisan')) {
+                return 'Laravel';
+            }
+            if (file_exists($dir . '/wp-config.php') || file_exists($dir . '/wp-load.php')) {
+                return 'WordPress';
+            }
+            if (file_exists($dir . '/bin/console')) {
+                return 'Symfony';
+            }
+            if (file_exists($dir . '/next.config.js') || file_exists($dir . '/next.config.mjs') || file_exists($dir . '/next.config.ts')) {
+                return 'Next.js';
+            }
+            if (file_exists($dir . '/nuxt.config.js') || file_exists($dir . '/nuxt.config.ts')) {
+                return 'Nuxt';
+            }
+            if (file_exists($dir . '/vite.config.js') || file_exists($dir . '/vite.config.ts') || file_exists($dir . '/vite.config.mjs')) {
+                return 'Vite';
+            }
+        }
+
+        return 'Generic / Custom';
+    }
+
+    public function getDetectedPackageManagers(): array
+    {
+        $pms = [];
+        $candidateDirs = array_unique(array_filter([
+            $this->activeDir ?? null,
+            $this->rootDir . '/__temp_update_clone',
+            $this->rootDir,
+        ], fn($d) => !empty($d) && is_dir($d)));
+
+        $hasComposer = false;
+        $hasNode = false;
+        $nodePmName = 'npm';
+
+        foreach ($candidateDirs as $dir) {
+            if (!$hasComposer && file_exists($dir . '/composer.json')) {
+                $hasComposer = true;
+            }
+            if (!$hasNode && file_exists($dir . '/package.json')) {
+                $hasNode = true;
+                $nodePM = new NodePackageManager($dir);
+                try {
+                    $nodePmName = $nodePM->detect();
+                } catch (\Throwable) {
+                    $nodePmName = 'npm';
+                }
+            }
+            if ($hasComposer && $hasNode) {
+                break;
+            }
+        }
+
+        if ($hasComposer) {
+            $isComposerIgnored = in_array('composer', $this->ignoreList, true) || $this->ignoreAll;
+            $pms[] = $isComposerIgnored ? 'Composer (ignored)' : 'Composer';
+        }
+
+        if ($hasNode) {
+            $isNodeIgnored = in_array('nodejs', $this->ignoreList, true) || $this->ignoreAll;
+            $pms[] = $isNodeIgnored ? "{$nodePmName} (ignored)" : $nodePmName;
+        }
+
+        if (empty($pms)) {
+            foreach ($candidateDirs as $dir) {
+                if (file_exists($dir . '/requirements.txt') || file_exists($dir . '/pyproject.toml') || file_exists($dir . '/Pipfile')) {
+                    $pms[] = 'Pip / Python';
+                    break;
+                }
+                if (file_exists($dir . '/Gemfile')) {
+                    $pms[] = 'Bundler';
+                    break;
+                }
+                if (file_exists($dir . '/Cargo.toml')) {
+                    $pms[] = 'Cargo';
+                    break;
+                }
+                if (file_exists($dir . '/go.mod')) {
+                    $pms[] = 'Go Modules';
+                    break;
+                }
+            }
+        }
+
+        return $pms;
+    }
+
+    public function showDeploymentSummary(): void
+    {
+        $projectName = $this->config['name'] ?? basename($this->rootDir);
+        $branch = $this->config['branch'] ?? 'main';
+        $framework = $this->getDetectedFramework();
+        $pms = $this->getDetectedPackageManagers();
+        $pmString = !empty($pms) ? implode(', ', $pms) : 'None detected';
+        $phpVersion = PHP_VERSION;
+        $strategy = $this->config['strategy'] ?? 'copy';
+
+        $title = "ShipIt Deploying: {$projectName} (branch: {$branch})";
+        $details = [
+            'Mode'            => 'Non-verbose (use --verbose or -v for detailed output)',
+            'Framework'       => $framework,
+            'Package Manager' => $pmString,
+            'Environment'     => 'PHP ' . $phpVersion,
+            'Strategy'        => $strategy,
+        ];
+
+        $this->ui->summary($title, $details);
     }
 
     private function linkShared(): void
