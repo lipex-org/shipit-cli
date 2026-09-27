@@ -19,6 +19,9 @@ use ShipIt\Validation\Rules\SystemUserRule;
 use ShipIt\Validation\Rules\AdapterExistsRule;
 use ShipIt\Validation\Rules\GlobalRegistryRule;
 use ShipIt\Validation\Rules\ConfigurationSchemaRule;
+use ShipIt\Config\EnvLoader;
+use ShipIt\Backup\BackupManager;
+use ShipIt\Backup\Encrypter;
 use Symfony\Component\Yaml\Yaml;
 
 class ShipIt
@@ -59,12 +62,15 @@ class ShipIt
     private array $adapterRunOrderRules = [];
     private ?string $transientDeployDir = null;
     private bool $preCloned = false;
+    private EnvLoader $env;
+    private ?BackupManager $backupManager = null;
 
     public function __construct(string $rootDir = '')
     {
         $this->ui = new TerminalUI();
         $this->runner = new TaskRunner($this->ui);
         $this->validator = new Validator($this->ui);
+        $this->env = new EnvLoader();
 
         $this->rootDir = $rootDir ?: getcwd() ?: __DIR__;
         $this->activeDir = $this->rootDir;
@@ -72,6 +78,9 @@ class ShipIt
 
         $home = $this->getHomeDir();
         $this->globalConfigFile = $home ? $home . DIRECTORY_SEPARATOR . '.shipit' . DIRECTORY_SEPARATOR . 'config.json' : '';
+
+        $globalDir = $home ? $home . DIRECTORY_SEPARATOR . '.shipit' : null;
+        $this->env->load($this->rootDir, $globalDir);
 
         $this->setupValidator();
         $this->setupTasks();
@@ -232,6 +241,10 @@ class ShipIt
             'registry:prune',
             'rollback',
             'backups',
+            'backup',
+            'backup:list',
+            'restore',
+            'env:init',
             'list',
             'status',
             'make:adapter',
@@ -288,8 +301,20 @@ class ShipIt
             $this->doRollback($argv);
             return;
         }
-        if ($cmd === 'backups') {
-            $this->doBackups();
+        if ($cmd === 'backups' || $cmd === 'backup:list') {
+            $this->doBackups($argv);
+            return;
+        }
+        if ($cmd === 'backup') {
+            $this->doManualBackup($argv);
+            return;
+        }
+        if ($cmd === 'restore') {
+            $this->doRestore($argv);
+            return;
+        }
+        if ($cmd === 'env:init') {
+            $this->doEnvInit($argv);
             return;
         }
         if ($cmd === 'list') {
@@ -649,6 +674,7 @@ class ShipIt
         $this->initReadmeFile($force);
         $this->initAdapterFile($force);
         $this->initDeployIgnoreFile($force);
+        $this->doEnvInit(['env:init']);
 
         // Attempt to create the backup directory if it doesn't exist
         $this->loadConfig();
@@ -1388,8 +1414,14 @@ PHP;
         $this->runRollbackHook('post-rollback');
     }
 
-    private function doBackups(): void
+    private function doBackups(array $argv = []): void
     {
+        $isCloud = in_array('--cloud', $argv, true);
+        if ($isCloud) {
+            $this->doListCloudBackups();
+            return;
+        }
+
         $backupRoot = $this->config['backup_path'];
         if (!is_dir($backupRoot)) {
             $this->ui->info("Backup directory does not exist yet.");
@@ -1398,12 +1430,12 @@ PHP;
 
         $backups = glob("$backupRoot/backup_*");
         if (empty($backups)) {
-            $this->ui->info("No backups found.");
+            $this->ui->info("No local backups found.");
             return;
         }
 
         rsort($backups);
-        $this->ui->info("Available Backups (most recent first):");
+        $this->ui->info("Available Local Backups (most recent first):");
         foreach ($backups as $b) {
             $ts = substr(basename($b), 7);
             echo "  - $ts (" . basename($b) . ")\n";
@@ -2057,13 +2089,16 @@ PHP;
         $this->ui->info("Commands:");
         $this->ui->info("  deploy           Run the full deployment lifecycle (default)");
         $this->ui->info("  rollback [id]    Revert to the most recent or specified backup");
+        $this->ui->info("  backup           Create a local backup (or --cloud for Cloudflare R2)");
+        $this->ui->info("  backups          List local backups (or --cloud for Cloudflare R2)");
+        $this->ui->info("  restore          Restore project database & files from Cloudflare R2");
+        $this->ui->info("  env:init         Generate .shipit.env with encryption key for secrets");
         $this->ui->info("  validate         Run configuration and environment validation");
         $this->ui->info("  registry:prune   Remove non-existent projects from the global registry");
         $this->ui->info("  init             Initialize ShipIt in the current directory");
         $this->ui->info("  make:adapter     Create a new custom adapter skeleton");
         $this->ui->info("  doctor           Check system prerequisites and setup");
         $this->ui->info("  status           Show project configuration and task order");
-        $this->ui->info("  backups          List available backups");
         $this->ui->info("  list             List all tasks and hooks in run order");
         $this->ui->info("  once:list        List all recorded one-time deployment steps");
         $this->ui->info("  once:reset [id]  Reset one-time step record (use --all for all)");
@@ -2071,6 +2106,7 @@ PHP;
         $this->ui->info("  version          Show current ShipIt version\n");
         $this->ui->info("Options:");
         $this->ui->info("  --verbose, -v    Display detailed execution output");
+        $this->ui->info("  --cloud          Target Cloudflare R2 storage for backups/restore");
         $this->ui->info("  --dry-run        Show what would be done without making changes");
         $this->ui->info("  --only=task1,task2 Only run specific tasks");
         $this->ui->info("  --ignore=task1   Skip specific tasks");
@@ -2849,8 +2885,184 @@ PHP;
         $this->ui->success("Reset one-time command '$target'. It will run again on the next deployment.");
     }
 
+    public function getEnv(): EnvLoader
+    {
+        return $this->env;
+    }
+
+    public function getBackupManager(): BackupManager
+    {
+        if ($this->backupManager === null) {
+            $this->backupManager = new BackupManager(
+                $this->rootDir,
+                $this->config,
+                $this->env,
+                $this->ui,
+                $this->fs
+            );
+        }
+        return $this->backupManager;
+    }
+
+    private function doEnvInit(array $argv): void
+    {
+        $targetFile = $this->rootDir . '/.shipit.env';
+        $force = in_array('--force', $argv, true);
+
+        if (file_exists($targetFile) && !$force) {
+            $this->ui->warning("File '.shipit.env' already exists in current project. Use --force to overwrite.");
+            return;
+        }
+
+        $generatedKey = Encrypter::generateKey();
+
+        $content = <<<ENV
+# ============================================================
+# ShipIt Server Secrets Configuration (DO NOT COMMIT TO GIT)
+# ============================================================
+
+# Cloudflare R2 Credentials
+SHIPIT_CLOUD_DRIVER="r2"
+SHIPIT_R2_ACCOUNT_ID=""
+SHIPIT_R2_ACCESS_KEY_ID=""
+SHIPIT_R2_SECRET_ACCESS_KEY=""
+SHIPIT_R2_BUCKET=""
+SHIPIT_R2_REGION="auto"
+
+# Backup Encryption Key (AES-256-GCM)
+# IMPORTANT: Save a copy of this key in a secure location (e.g. Google Drive / Password Manager)!
+SHIPIT_BACKUP_KEY="{$generatedKey}"
+
+# Optional Database Overrides (if different from project .env or for specialized backup user)
+# SHIPIT_DB_CONNECTION="mysql"
+# SHIPIT_DB_HOST="127.0.0.1"
+# SHIPIT_DB_PORT="3306"
+# SHIPIT_DB_DATABASE=""
+# SHIPIT_DB_USERNAME="root"
+# SHIPIT_DB_PASSWORD=""
+
+ENV;
+
+        if (file_put_contents($targetFile, $content) === false) {
+            $this->ui->error("Failed to write .shipit.env to {$targetFile}");
+            return;
+        }
+
+        // Set restrictive file permissions (read/write only for owner)
+        @chmod($targetFile, 0600);
+
+        // Ensure .shipit.env is in .gitignore and .deployignore
+        $this->ensureGitIgnored('.shipit.env');
+
+        $this->ui->success("Created .shipit.env with a secure 256-bit AES encryption key: {$targetFile}");
+        $this->ui->info("Generated Key: " . $generatedKey);
+        $this->ui->warning("Please store this key safely outside the VPS to recover backups in case of server failure.");
+    }
+
+    private function ensureGitIgnored(string $entry): void
+    {
+        $gitignore = $this->rootDir . '/.gitignore';
+        if (file_exists($gitignore)) {
+            $content = file_get_contents($gitignore) ?: '';
+            if (!str_contains($content, $entry)) {
+                file_put_contents($gitignore, rtrim($content) . PHP_EOL . $entry . PHP_EOL);
+                $this->ui->verbose("Added {$entry} to .gitignore", 'success');
+            }
+        }
+    }
+
+    private function doManualBackup(array $argv): void
+    {
+        $isCloud = in_array('--cloud', $argv, true);
+        $customKey = null;
+
+        foreach ($argv as $arg) {
+            if (str_starts_with($arg, '--key=')) {
+                $customKey = substr($arg, 6);
+            }
+        }
+
+        if ($isCloud) {
+            try {
+                $manager = $this->getBackupManager();
+                $remoteKey = $manager->createCloudBackup($customKey);
+                $this->ui->success("Cloud backup completed successfully: {$remoteKey}");
+            } catch (\Throwable $e) {
+                $this->ui->error("Cloud backup failed: " . $e->getMessage());
+                $this->updateGlobalRegistry('failed');
+                exit(1);
+            }
+            return;
+        }
+
+        // Local backup
+        $this->doBackup();
+        $this->ui->success("Local backup completed successfully.");
+    }
+
+    private function doListCloudBackups(): void
+    {
+        try {
+            $manager = $this->getBackupManager();
+            $objects = $manager->listCloudBackups();
+
+            if (empty($objects)) {
+                $this->ui->info("No cloud backups found for project: " . ($this->config['name'] ?? basename($this->rootDir)));
+                return;
+            }
+
+            $this->ui->info("Available Cloud Backups (Cloudflare R2):");
+            $rows = [];
+            foreach ($objects as $obj) {
+                $sizeMb = round($obj['size'] / (1024 * 1024), 2);
+                $rows[] = [
+                    $obj['key'],
+                    "{$sizeMb} MB",
+                    $obj['last_modified'] ?? '-',
+                ];
+            }
+
+            $this->ui->table(['Remote Key', 'Size', 'Last Modified (UTC)'], $rows);
+        } catch (\Throwable $e) {
+            $this->ui->error("Failed to list cloud backups: " . $e->getMessage());
+        }
+    }
+
+    private function doRestore(array $argv): void
+    {
+        $specificKey = null;
+        $customKey = null;
+        $restoreDb = true;
+        $restoreFiles = true;
+
+        foreach ($argv as $arg) {
+            if (str_starts_with($arg, '--from=')) {
+                $specificKey = substr($arg, 7);
+            } elseif (str_starts_with($arg, '--id=')) {
+                $specificKey = substr($arg, 5);
+            } elseif (str_starts_with($arg, '--key=')) {
+                $customKey = substr($arg, 6);
+            } elseif ($arg === '--no-db') {
+                $restoreDb = false;
+            } elseif ($arg === '--no-files') {
+                $restoreFiles = false;
+            } elseif ($arg !== 'restore' && !str_starts_with($arg, '--')) {
+                $specificKey = $arg;
+            }
+        }
+
+        try {
+            $manager = $this->getBackupManager();
+            $manager->restoreFromCloud($specificKey, $customKey, $restoreDb, $restoreFiles);
+        } catch (\Throwable $e) {
+            $this->ui->error("Restore failed: " . $e->getMessage());
+            exit(1);
+        }
+    }
+
     public function getLastExitCode(): int
     {
         return $this->lastExitCode;
     }
 }
+
